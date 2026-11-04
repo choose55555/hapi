@@ -1,3 +1,4 @@
+import { mergeWorkbenchSettings, workbenchEnabled } from "./utils/workbench";
 import { mkdirSync } from "node:fs";
 import { logger } from "@/ui/logger";
 import { claudeCheckSession } from "./utils/claudeCheckSession";
@@ -101,7 +102,9 @@ export async function claudeLocal(opts: {
     }
 
     // Add hook settings for session tracking
-    args.push('--settings', opts.hookSettingsPath);
+    if (!workbenchEnabled('HAPI_WORKBENCH_MERGE_SETTINGS')) {
+        args.push('--settings', opts.hookSettingsPath);
+    }
     logger.debug(`[ClaudeLocal] Using hook settings: ${opts.hookSettingsPath}`);
 
     // Add blobs directory for file upload access
@@ -123,14 +126,22 @@ export async function claudeLocal(opts: {
         ...opts.claudeEnvVars
     }
 
-    logger.debug(`[ClaudeLocal] Spawning claude with args: ${JSON.stringify(args)}`);
+    if (workbenchEnabled('HAPI_WORKBENCH_MERGE_SETTINGS') || workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+        logger.debug('[ClaudeLocal] Spawning Claude with workbench configuration (arguments redacted)');
+    } else {
+        logger.debug(`[ClaudeLocal] Spawning claude with args: ${JSON.stringify(args)}`);
+    }
 
     // Get Claude executable path (absolute path on Windows for shell: false)
     const claudeCommand = getDefaultClaudeCodePath();
     logger.debug(`[ClaudeLocal] Using claude executable: ${claudeCommand}`);
 
-    // Spawn the process
+    // Spawn the process. Create the settings copy only inside its cleanup scope.
+    let cleanupSettings: (() => void) | undefined;
+    const cleanupOnExit = () => cleanupSettings?.();
     try {
+        cleanupSettings = mergeWorkbenchSettings(args, opts.hookSettingsPath, opts.path);
+        if (cleanupSettings) process.once('exit', cleanupOnExit);
         await spawnWithTerminalGuard({
             command: claudeCommand,
             args,
@@ -145,7 +156,9 @@ export async function claudeLocal(opts: {
             shell: false  // Use absolute path, no shell needed
         });
     } finally {
+        if (cleanupSettings) process.removeListener('exit', cleanupOnExit);
         cleanupMcpConfig?.();
+        cleanupSettings?.();
     }
 
     return startFrom ?? null;

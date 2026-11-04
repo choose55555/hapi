@@ -1,72 +1,217 @@
-name: Release
+name: Workbench Release
 
 on:
     push:
         tags:
-            - 'v*'
+            - 'workbench-v*'
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: 'Release tag (workbench-vX.Y.Z)'
+                required: true
+                type: string
+            ref:
+                description: 'Exact commit or ref to build (empty = current commit)'
+                required: false
+                type: string
+    workflow_call:
+        inputs:
+            tag:
+                required: true
+                type: string
+            ref:
+                required: true
+                type: string
 
 permissions:
-    contents: write
-    # npm Trusted Publishing (OIDC); no npm token is stored in the repo.
-    id-token: write
+    contents: read
 
 concurrency:
-    group: release-${{ github.ref }}
+    group: workbench-release-${{ inputs.tag || github.ref_name }}
+    cancel-in-progress: false
 
 jobs:
-    release:
+    build:
+        if: github.repository == 'choose55555/hapi'
         runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.identity.outputs.tag }}
+            sha: ${{ steps.identity.outputs.sha }}
         steps:
             - uses: actions/checkout@v4
-            - uses: oven-sh/setup-bun@v2
-            - uses: actions/setup-node@v4
               with:
-                  node-version: 24
-            # Trusted Publishing needs npm >= 11.5.1.
-            - run: npm install -g npm@11
-            - name: Check tag matches CLI version
+                  ref: ${{ inputs.ref || github.sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: '1.4.4'
+            - name: Validate build identity
+              id: identity
+              env:
+                  REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
               run: |
-                  VERSION="$(node -p "require('./cli/package.json').version")"
-                  if [[ "v$VERSION" != "$GITHUB_REF_NAME" ]]; then
-                      echo "::error::Tag $GITHUB_REF_NAME does not match cli/package.json version $VERSION"
+                  set -euo pipefail
+                  [[ "$REQUESTED_TAG" =~ ^workbench-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+                  VERSION="$(bun -e 'console.log(JSON.parse(await Bun.file("cli/package.json").text()).version)')"
+                  test "$REQUESTED_TAG" = "workbench-v$VERSION"
+                  echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+                  echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            - run: bun install --frozen-lockfile
+            - name: Red baseline on upstream production files
+              env:
+                  RED_ROOT: ${{ runner.temp }}/hapi-workbench-red
+              run: |
+                  set -euo pipefail
+                  BASE="$(tr -d '\r\n' < .github/workbench-upstream.txt)"
+                  [[ "$BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+                  git fetch --no-tags https://github.com/tiann/hapi.git "refs/tags/$BASE:refs/tags/workbench-red-$BASE"
+                  git worktree add --detach "$RED_ROOT" HEAD
+                  # Keep new tests/helpers; restore only old production call sites.
+                  for file in cli/src/commands/claude.ts cli/src/claude/claudeLocal.ts cli/src/claude/claudeRemote.ts cli/src/claude/sdk/query.ts cli/src/claude/sdk/metadataExtractor.ts cli/src/claude/runClaude.ts cli/src/claude/utils/permissionHandler.ts cli/src/claude/utils/localPermissionBridge.ts hub/src/web/routes/machines.ts hub/src/web/routes/sessions.ts hub/src/sync/syncEngine.ts hub/src/sync/rpcGateway.ts; do
+                      git show "refs/tags/workbench-red-$BASE:$file" > "$RED_ROOT/$file"
+                  done
+                  cd "$RED_ROOT"
+                  bun install --frozen-lockfile
+                  cd cli
+                  bun run tools:unpack
+                  set +e
+                  bun run test:win src/commands/claude.workbench.test.ts src/claude/claudeLocal.workbench.test.ts src/claude/claudeRemote.workbench.test.ts src/claude/sdk/query.workbench.test.ts --reporter=json --outputFile="$GITHUB_WORKSPACE/red-cli.json"
+                  RESULT=$?
+                  set -e
+                  test "$RESULT" -ne 0
+                  # A missing runner/import is not RED: require concrete failed assertions for each CLI switch.
+                  bun -e '
+                    const r = JSON.parse(await Bun.file(process.env.GITHUB_WORKSPACE + "/red-cli.json").text());
+                    const failures = r.testResults.flatMap(x => x.assertionResults ?? []).filter(x => x.status === "failed");
+                    for (const name of ["NO_RUNNER=1", "retains copy until spawn finishes", "preserves native permissions and startup config only with opt-in 1", "cleans the private copy"]) {
+                      if (!failures.some(x => x.fullName.includes(name) && x.failureMessages.some(m => /AssertionError|expected|promise resolved/i.test(m)))) throw new Error("Missing behavioral RED: " + name);
+                    }
+                  '
+                  cd ../hub
+                  set +e
+                  bun test src/web/routes/workbench.test.ts > "$GITHUB_WORKSPACE/red-hub.log" 2>&1
+                  RESULT=$?
+                  set -e
+                  test "$RESULT" -ne 0
+                  grep -q 'Expected: 403' "$GITHUB_WORKSPACE/red-hub.log"
+                  echo "Upstream call sites fail the intended workbench assertions."
+            - name: Typecheck changed packages
+              run: |
+                  bun run typecheck:cli
+                  bun run typecheck:hub
+            - name: Workbench and upstream CLI regression tests
+              working-directory: cli
+              run: |
+                  bun run tools:unpack
+                  bun run test:win src/commands/claude.workbench.test.ts src/claude/utils/workbench.test.ts src/claude/utils/permissions.workbench.test.ts src/claude/claudeLocal.workbench.test.ts src/claude/claudeRemote.workbench.test.ts src/claude/sdk/query.workbench.test.ts src/claude/claudeLocal.test.ts src/claude/claudeRemote.test.ts src/claude/sdk/query.test.ts src/claude/sdk/metadataExtractor.test.ts src/claude/utils/localPermissionBridge.test.ts src/claude/utils/permissionHandler.test.ts
+            - name: Workbench and upstream hub regression tests
+              working-directory: hub
+              run: bun test src/web/routes/workbench.test.ts src/web/routes/machines.test.ts src/web/routes/sessions.test.ts src/sync/rpcGateway.test.ts
+            - name: Build upstream all-in-one executables
+              run: bun run build:single-exe:all
+            - name: Package Windows executable
+              run: |
+                  set -euo pipefail
+                  mkdir -p release-artifacts
+                  zip -j release-artifacts/hapi-win32-x64.zip cli/dist-exe/bun-windows-x64/hapi.exe
+                  cd release-artifacts
+                  sha256sum hapi-win32-x64.zip > checksums.txt
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: workbench-windows
+                  path: release-artifacts/
+                  if-no-files-found: error
+
+            - name: Retain baseline evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: workbench-red-evidence
+                  path: |
+                      red-cli.json
+                      red-hub.log
+                  if-no-files-found: warn
+
+    windows-smoke:
+        needs: build
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  ref: ${{ needs.build.outputs.sha }}
+                  persist-credentials: false
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  bun-version: '1.4.4'
+            - run: bun install --frozen-lockfile
+            - name: Verify Windows settings copy location and cleanup
+              working-directory: cli
+              run: bun run test:win src/claude/utils/workbench.test.ts src/claude/claudeLocal.workbench.test.ts src/claude/sdk/query.workbench.test.ts
+            - uses: actions/download-artifact@v4
+              with:
+                  name: workbench-windows
+                  path: release-artifacts
+            - name: Verify archive and executable startup
+              shell: pwsh
+              env:
+                  EXPECTED_TAG: ${{ needs.build.outputs.tag }}
+                  HAPI_WORKBENCH_NO_RUNNER: '1'
+                  HAPI_WORKBENCH_MERGE_SETTINGS: '1'
+                  HAPI_WORKBENCH_PRESERVE_REMOTE: '1'
+                  HAPI_WORKBENCH_NO_SPAWN: '1'
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $archive = Join-Path $PWD 'release-artifacts/hapi-win32-x64.zip'
+                  $line = (Get-Content -LiteralPath (Join-Path $PWD 'release-artifacts/checksums.txt') -Raw).Trim()
+                  if ($line -notmatch '^([0-9a-f]{64})\s+\*?hapi-win32-x64\.zip$') { throw 'Invalid checksum manifest' }
+                  $expected = $Matches[1]
+                  if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Archive checksum mismatch' }
+                  $target = Join-Path $env:RUNNER_TEMP 'hapi-workbench-smoke'
+                  Expand-Archive -LiteralPath $archive -DestinationPath $target
+                  $exe = Join-Path $target 'hapi.exe'
+                  if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'Executable missing' }
+                  $start = [System.Diagnostics.ProcessStartInfo]::new()
+                  $start.FileName = $exe
+                  $start.Arguments = '--version'
+                  $start.UseShellExecute = $false
+                  $start.CreateNoWindow = $true
+                  $start.RedirectStandardOutput = $true
+                  $start.RedirectStandardError = $true
+                  $process = [System.Diagnostics.Process]::Start($start)
+                  $stdout = $process.StandardOutput.ReadToEndAsync()
+                  $stderr = $process.StandardError.ReadToEndAsync()
+                  if (-not $process.WaitForExit(30000)) { $process.Kill($true); throw 'Version smoke timed out' }
+                  if ($process.ExitCode -ne 0) { throw "Version smoke exit $($process.ExitCode)" }
+                  $version = $env:EXPECTED_TAG -replace '^workbench-v', ''
+                  # v0.34.1 cli/src/commands/runCli.ts prints this exact prefix.
+                  if ($stdout.Result.Trim() -ne "hapi version: $version") { throw 'Executable version mismatch' }
+                  if (-not [string]::IsNullOrWhiteSpace($stderr.Result)) { throw 'Unexpected version stderr' }
+                  Write-Output $stdout.Result
+                  Write-Output "Executable SHA256: $((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash)"
+
+    publish:
+        needs: [build, windows-smoke]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: workbench-windows
+                  path: release-artifacts
+            - name: Publish tested commit only
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  RELEASE_TAG: ${{ needs.build.outputs.tag }}
+                  BUILD_SHA: ${{ needs.build.outputs.sha }}
+              run: |
+                  set -euo pipefail
+                  cd release-artifacts
+                  sha256sum --check checksums.txt
+                  if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+                      echo "::error::Release already exists; refusing to replace tested artifacts"
                       exit 1
                   fi
-            - run: bun install --frozen-lockfile
-            - run: bun run build:single-exe:all
-            - name: Publish to npm
-              run: bun run --cwd cli publish-npm
-            - name: Package release artifacts
-              run: |
-                  cd cli/dist-exe
-                  mkdir -p ../release-artifacts
-
-                  for dir in bun-*/; do
-                      target="${dir%/}"
-                      # bun-darwin-arm64 -> hapi-darwin-arm64
-                      name="hapi-${target#bun-}"
-                      name="${name/windows/win32}"
-
-                      if [[ "$target" == *"windows"* ]]; then
-                          zip -j "../release-artifacts/${name}.zip" "$target"/hapi.exe
-                      else
-                          tar -czvf "../release-artifacts/${name}.tar.gz" -C "$target" hapi
-                      fi
-                  done
-
-                  cd ../release-artifacts
-                  sha256sum * > checksums.txt
-            - name: Create Release
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: |
-                  gh release create "${GITHUB_REF#refs/tags/}" \
-                      --title "Release ${GITHUB_REF#refs/tags/}" \
-                      --generate-notes \
-                      cli/release-artifacts/*
-            - name: Update Homebrew formula
-              continue-on-error: true
-              env:
-                  GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-              run: |
-                  VERSION="${GITHUB_REF#refs/tags/v}"
-                  cd cli && bun run update-homebrew-formula --version "$VERSION" --push
+                  gh release create "$RELEASE_TAG" --target "$BUILD_SHA" --title "HAPI Workbench $RELEASE_TAG" --notes "Source commit: $BUILD_SHA. Workbench switches default OFF. Phone approval is required before installing an update." hapi-win32-x64.zip checksums.txt

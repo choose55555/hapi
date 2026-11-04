@@ -1,0 +1,86 @@
+name: Track Upstream
+
+on:
+    schedule:
+        - cron: '27 3 * * *'
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: workbench-track-upstream
+    cancel-in-progress: false
+
+jobs:
+    rebase:
+        if: github.repository == 'choose55555/hapi'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        outputs:
+            changed: ${{ steps.rebase.outputs.changed }}
+            sha: ${{ steps.rebase.outputs.sha }}
+            tag: ${{ steps.rebase.outputs.tag }}
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+            - name: Find newest stable upstream tag
+              id: latest
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  # Paginate all tags; do not assume API ordering or that latest release is stable.
+                  gh api --paginate repos/tiann/hapi/tags --jq '.[].name' |
+                    grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' |
+                    sort -V > "$RUNNER_TEMP/hapi-stable-tags.txt"
+                  test -s "$RUNNER_TEMP/hapi-stable-tags.txt"
+                  echo "tag=$(tail -n 1 "$RUNNER_TEMP/hapi-stable-tags.txt")" >> "$GITHUB_OUTPUT"
+            - name: Rebase patch commits into a new branch
+              id: rebase
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  GH_REPO: ${{ github.repository }}
+                  UPSTREAM_TAG: ${{ steps.latest.outputs.tag }}
+              run: |
+                  set -euo pipefail
+                  BASE="$(tr -d '\r\n' < .github/workbench-upstream.txt)"
+                  [[ "$BASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+                  RELEASE_TAG="workbench-$UPSTREAM_TAG"
+                  if [[ "$UPSTREAM_TAG" == "$BASE" ]] || gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+                      echo "changed=false" >> "$GITHUB_OUTPUT"
+                      exit 0
+                  fi
+                  NEWEST="$(printf '%s\n%s\n' "$BASE" "$UPSTREAM_TAG" | sort -V | tail -n 1)"
+                  test "$NEWEST" = "$UPSTREAM_TAG"
+                  git config user.name github-actions
+                  git config user.email github-actions@github.com
+                  git fetch --no-tags https://github.com/tiann/hapi.git "refs/tags/$BASE:refs/tags/hapi-upstream-$BASE" "refs/tags/$UPSTREAM_TAG:refs/tags/hapi-upstream-$UPSTREAM_TAG"
+                  git merge-base --is-ancestor "refs/tags/hapi-upstream-$BASE" HEAD
+                  BRANCH="workbench-upstream-$UPSTREAM_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                  git switch -c "$BRANCH"
+                  # A conflict fails this job and leaves the Actions log; no skip, ours/theirs, or force push.
+                  git rebase --onto "refs/tags/hapi-upstream-$UPSTREAM_TAG" "refs/tags/hapi-upstream-$BASE"
+                  printf '%s\n' "$UPSTREAM_TAG" > .github/workbench-upstream.txt
+                  git add .github/workbench-upstream.txt
+                  git commit -m "Track upstream $UPSTREAM_TAG"
+                  SHA="$(git rev-parse HEAD)"
+                  # Send credential through a single process environment header, never remote URL or logs.
+                  AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+                  echo "::add-mask::$AUTH"
+                  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH" git push origin "HEAD:refs/heads/$BRANCH"
+                  echo "changed=true" >> "$GITHUB_OUTPUT"
+                  echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+                  echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+    release:
+        needs: rebase
+        if: needs.rebase.outputs.changed == 'true'
+        permissions:
+            contents: write
+        uses: ./.github/workflows/release.yml
+        with:
+            ref: ${{ needs.rebase.outputs.sha }}
+            tag: ${{ needs.rebase.outputs.tag }}

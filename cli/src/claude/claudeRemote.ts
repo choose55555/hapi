@@ -1,3 +1,4 @@
+import { workbenchEnabled, PERMISSION_LOCK_MESSAGE } from "./utils/workbench";
 import { EnhancedMode, PermissionMode } from "./loop";
 import { query, type QueryOptions as Options, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
 import { claudeCheckSession } from "./utils/claudeCheckSession";
@@ -57,6 +58,7 @@ interface ActiveCompact {
 const EFFORT_APPLY_TIMEOUT_MS = 5_000;
 
 function nativePermissionMode(mode: PermissionMode): PermissionMode {
+    if (workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) return mode;
     return mode === 'acceptEdits' || mode === 'bypassPermissions' ? 'default' : mode;
 }
 
@@ -408,6 +410,10 @@ export async function claudeRemote(opts: {
     let switchesInFlight = 0;
     let modeChangeSeq = 0;
     opts.setPermissionModeListener?.((next) => {
+        if (workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+            if (next !== requestedMode) opts.onPermissionModeRejected?.(requestedMode, PERMISSION_LOCK_MESSAGE);
+            return;
+        }
         const previous = requestedMode;
         if (next !== previous) {
             modeChangeSeq += 1;
