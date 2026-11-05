@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import type { ClaudeModelSummary, ClaudeModelsResponse } from '@hapi/protocol/apiTypes'
 import { getDefaultClaudeCodePath } from '@/claude/sdk/utils'
 import { withBunRuntimeEnv } from '@/utils/bunRuntime'
+import { claudeChildEnv } from '@/claude/utils/childEnv'
 import { killProcessByChildProcess } from '../../utils/process'
 import { getErrorMessage } from './rpcResponses'
 
@@ -138,7 +139,7 @@ function runClaudeModelsProbe(executable: string): Promise<ListClaudeModelsRespo
     return new Promise((resolve, reject) => {
         const child = spawn(executable, [...CLAUDE_MODELS_PROBE_ARGS], {
             cwd: homedir(),
-            env: withBunRuntimeEnv(process.env, { allowBunBeBun: false }),
+            env: claudeChildEnv(withBunRuntimeEnv(process.env, { allowBunBeBun: false })),
             stdio: ['pipe', 'pipe', 'pipe'],
             // getDefaultClaudeCodePath resolves an absolute path (claude.exe on
             // Windows), matching how sessions spawn it.

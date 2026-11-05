@@ -1,3 +1,4 @@
+import { assertWorkbenchPermissionChangeAllowed, workbenchEnabled, PERMISSION_LOCK_MESSAGE } from './workbench';
 /**
  * Permission Handler for canCallTool integration
  * 
@@ -215,6 +216,11 @@ export class PermissionHandler extends BasePermissionHandler<PermissionResponse,
                 });
             }
             return completion;
+        }
+
+        if (workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE') && (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode')) {
+            pending.resolve({ behavior: 'deny', message: PERMISSION_LOCK_MESSAGE });
+            return { status: 'denied', reason: PERMISSION_LOCK_MESSAGE };
         }
 
         if (pending.toolName === 'exit_plan_mode' || pending.toolName === 'ExitPlanMode') {
@@ -490,6 +496,8 @@ export class PermissionHandler extends BasePermissionHandler<PermissionResponse,
     }
 
     protected onResponseReceived(response: PermissionResponse): void {
+        // Validate before BasePermissionHandler removes the pending request.
+        if (response.mode !== undefined) assertWorkbenchPermissionChangeAllowed();
         logger.debug(`Permission response: ${JSON.stringify(response)}`);
         this.responses.set(response.id, { ...response, receivedAt: Date.now() });
     }

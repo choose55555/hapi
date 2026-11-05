@@ -1,3 +1,4 @@
+import { workbenchEnabled } from '@/claude/utils/workbench'
 import chalk from 'chalk'
 import { z } from 'zod'
 import { PROTOCOL_VERSION } from '@hapi/protocol'
@@ -98,7 +99,7 @@ export const claudeCommand: CommandDefinition = {
 
         logger.debug('Ensuring hapi background service is running & matches our version...')
 
-        if (!(await isRunnerRunningCurrentlyInstalledHappyVersion())) {
+        if (!workbenchEnabled('HAPI_WORKBENCH_NO_RUNNER') && !(await isRunnerRunningCurrentlyInstalledHappyVersion())) {
             logger.debug('Starting hapi background service...')
 
             const runnerProcess = spawnHappyCLI(['runner', 'start-sync'], {

@@ -84,6 +84,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+    vi.unstubAllEnvs()
     vi.useRealTimers()
 })
 
@@ -200,6 +201,23 @@ describe('parseClaudeModelsProbeLine', () => {
 })
 
 describe('listClaudeModels', () => {
+    it.each(['1', '0', '', 'true', '01'])('passes child-only env to model discovery, switch=%s', async flag => {
+        vi.stubEnv('HAPI_WORKBENCH_CHILD_ENV', flag)
+        for (const key of ['HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'https_proxy', 'http_proxy', 'all_proxy']) vi.stubEnv(key, undefined)
+        vi.stubEnv('HAPI_WORKBENCH_CHILD_HTTPS_PROXY', 'http://127.0.0.1:17898')
+        vi.stubEnv('CLI_API_TOKEN', 'fake-hapi-token')
+        const pending = listClaudeModels()
+        const env = spawnMock.mock.calls[0][2].env as NodeJS.ProcessEnv
+        expect(env.HTTPS_PROXY).toBe(flag === '1' ? 'http://127.0.0.1:17898' : undefined)
+        expect(env.CLI_API_TOKEN).toBe(flag === '1' ? undefined : 'fake-hapi-token')
+        expect(env.HAPI_WORKBENCH_CHILD_HTTPS_PROXY).toBe(flag === '1' ? undefined : 'http://127.0.0.1:17898')
+        expect(env.HAPI_WORKBENCH_CHILD_ENV).toBe(flag === '1' ? undefined : flag)
+        expect(process.env.HTTPS_PROXY).toBeUndefined()
+        expect(process.env.CLI_API_TOKEN).toBe('fake-hapi-token')
+        lastChild().respond([OPUS_ROW])
+        await pending
+    })
+
     it('spawns the session executable isolated from project settings, hooks and MCP servers', async () => {
         const pending = listClaudeModels()
         lastChild().respond([OPUS_ROW])
