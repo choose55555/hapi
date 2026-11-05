@@ -3,6 +3,7 @@
  * Captures available tools and slash commands from Claude SDK initialization
  */
 
+import { workbenchEnabled } from '../utils/workbench'
 import { query } from './query'
 import type { SDKSystemMessage } from './types'
 import { logger } from '@/ui/logger'
@@ -28,16 +29,41 @@ const CATALOG_VALUE_FLAGS = new Set([
 ])
 
 export function filterCatalogAffectingClaudeArgs(args: readonly string[] | undefined): string[] {
+    return filterClaudeArgs(args, false)
+}
+
+/** Startup identity/continuation must never be applied to the metadata probe. */
+export function filterRemoteClaudeArgs(args: readonly string[] | undefined, options: {
+    resume?: string
+    forkSession?: boolean
+    fallbackModel?: string
+} = {}): string[] {
+    const remoteStartup = workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')
+    return filterClaudeArgs(args, remoteStartup, remoteStartup ? options : {})
+}
+
+function filterClaudeArgs(args: readonly string[] | undefined, remoteStartup: boolean, options: {
+    resume?: string
+    forkSession?: boolean
+    fallbackModel?: string
+} = {}): string[] {
     if (!args) return []
+    const flags = remoteStartup ? new Set([...CATALOG_FLAGS, '--strict-mcp-config']) : CATALOG_FLAGS
+    const valueFlags = workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')
+        ? new Set([...CATALOG_VALUE_FLAGS, '--system-prompt-file', '--mcp-config',
+            ...(remoteStartup && !options.fallbackModel ? ['--fallback-model'] : []),
+            ...(remoteStartup && !(options.resume && !options.forkSession) ? ['--session-id'] : [])])
+        : CATALOG_VALUE_FLAGS
     const filtered: string[] = []
     for (let i = 0; i < args.length; i++) {
         const arg = args[i]
         const equalsIndex = arg.indexOf('=')
-        if (CATALOG_FLAGS.has(arg) || (equalsIndex > 0 && CATALOG_VALUE_FLAGS.has(arg.slice(0, equalsIndex)))) {
+        if (flags.has(arg) || (equalsIndex > 0 && (valueFlags.has(arg.slice(0, equalsIndex))
+            || (remoteStartup && arg.slice(0, equalsIndex) === '--strict-mcp-config')))) {
             filtered.push(arg)
             continue
         }
-        if (!CATALOG_VALUE_FLAGS.has(arg)) continue
+        if (!valueFlags.has(arg)) continue
         filtered.push(arg)
         while (i + 1 < args.length && !args[i + 1].startsWith('-')) {
             filtered.push(args[++i])

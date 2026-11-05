@@ -1,3 +1,4 @@
+import { assertWorkbenchPermissionChangeAllowed, workbenchEnabled, PERMISSION_LOCK_MESSAGE } from './utils/workbench';
 import { logger } from '@/ui/logger';
 import { loop } from '@/claude/loop';
 import { AgentState, SessionEffort, SessionModel } from '@/api/types';
@@ -54,7 +55,9 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     const startedBy = options.startedBy ?? 'terminal';
 
     // Log environment info at startup
-    logger.debugLargeJson('[START] HAPI process started', getEnvironmentInfo());
+    if (!workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+        logger.debugLargeJson('[START] HAPI process started', getEnvironmentInfo());
+    }
     logger.debug(`[START] Options: startedBy=${startedBy}, startingMode=${options.startingMode}`);
 
     // Validate runner spawn requirements
@@ -449,6 +452,12 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             return;
         }
 
+        if (specialCommand.type === 'plan' && workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+            session.sendSessionEvent({ type: 'message', message: PERMISSION_LOCK_MESSAGE });
+            if (localId) session.emitMessagesConsumed([localId]);
+            return;
+        }
+
         if (specialCommand.type === 'plan') {
             logger.debug('[start] Detected /plan command');
             currentPermissionMode = specialCommand.mode ?? 'plan';
@@ -569,6 +578,10 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
         const sessionPermissionMode = currentSessionRef.current?.getPermissionMode();
         if (sessionPermissionMode && isPermissionModeAllowedForFlavor(sessionPermissionMode, 'claude')) {
             currentPermissionMode = sessionPermissionMode as PermissionMode;
+        }
+
+        if (config.permissionMode !== undefined && config.permissionMode !== currentPermissionMode) {
+            assertWorkbenchPermissionChangeAllowed();
         }
 
         if (config.permissionMode !== undefined) {

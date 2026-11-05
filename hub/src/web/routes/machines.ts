@@ -1,3 +1,4 @@
+import { workbenchSpawnMiddleware } from '../../sync/workbench'
 import {
     MACHINE_DISPLAY_NAME_MAX_LENGTH,
     MACHINE_CAPABILITIES,
@@ -60,6 +61,7 @@ export function createMachinesRoutes(
     options?: MachinesRoutesOptions
 ): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
+    app.use('*', workbenchSpawnMiddleware)
     app.get('/machines', (c) => {
         const engine = getSyncEngine()
         if (!engine) {

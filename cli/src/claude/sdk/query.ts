@@ -32,6 +32,7 @@ import type { Writable } from 'node:stream'
 import { logger } from '@/ui/logger'
 import type { ClaudePermissionMode } from '@hapi/protocol/types'
 import { appendMcpConfigArg } from '../utils/mcpConfig'
+import { mergeWorkbenchSettings, workbenchEnabled } from '../utils/workbench'
 
 const DEFAULT_PROMPT_FAILURE_CLEANUP_TIMEOUT_MS = 3_000
 
@@ -394,7 +395,7 @@ export function query(config: {
     if (resume) args.push('--resume', resume)
     if (forkSession) args.push('--fork-session')
     args.push(...additionalArgs)
-    if (settingsPath) args.push('--settings', settingsPath)
+    if (settingsPath && !workbenchEnabled('HAPI_WORKBENCH_MERGE_SETTINGS')) args.push('--settings', settingsPath)
     if (allowedTools.length > 0) args.push('--allowedTools', allowedTools.join(','))
     if (disallowedTools.length > 0) args.push('--disallowedTools', disallowedTools.join(','))
     if (additionalDirectories.length > 0) args.push('--add-dir', ...additionalDirectories)
@@ -433,19 +434,34 @@ export function query(config: {
 
     // Spawn Claude Code process
     const spawnEnv = withBunRuntimeEnv(process.env, { allowBunBeBun: false })
-    logDebug(`Spawning Claude Code process: ${spawnCommand} ${spawnArgs.join(' ')}`)
+    if (workbenchEnabled('HAPI_WORKBENCH_MERGE_SETTINGS') || workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+        logDebug('Spawning Claude Code process with workbench configuration (arguments redacted)')
+    } else {
+        logDebug(`Spawning Claude Code process: ${spawnCommand} ${spawnArgs.join(' ')}`)
+    }
 
-    const child = spawn(spawnCommand, spawnArgs, {
-        cwd,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        signal: config.options?.abort,
-        env: spawnEnv,
-        // Use shell: false with absolute path from getDefaultClaudeCodePath()
-        // This avoids cmd.exe resolution issues on Windows
-        shell: false,
-        // Hide transient console windows on Windows when spawning Claude Code
-        windowsHide: process.platform === 'win32'
-    }) as ChildProcessWithoutNullStreams
+    let cleanupSettings: (() => void) | undefined
+    let child: ChildProcessWithoutNullStreams
+    try {
+        cleanupSettings = mergeWorkbenchSettings(spawnArgs, settingsPath, cwd)
+        child = spawn(spawnCommand, spawnArgs, {
+            cwd,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            signal: config.options?.abort,
+            env: spawnEnv,
+            // Use shell: false with absolute path from getDefaultClaudeCodePath()
+            // This avoids cmd.exe resolution issues on Windows
+            shell: false,
+            // Hide transient console windows on Windows when spawning Claude Code
+            windowsHide: process.platform === 'win32'
+        }) as ChildProcessWithoutNullStreams
+    } catch (error) {
+        if (workbenchEnabled('HAPI_WORKBENCH_MERGE_SETTINGS')) {
+            cleanupSettings?.()
+            cleanupMcpConfig?.()
+        }
+        throw error
+    }
 
     // Handle process exit
     let resolveExit: () => void
@@ -489,6 +505,7 @@ export function query(config: {
         void cleanup()
     }
     const handleProcessExit = () => {
+        cleanupSettings?.()
         void cleanup()
     }
     config.options?.abort?.addEventListener('abort', handleAbort)
@@ -533,6 +550,7 @@ export function query(config: {
 
     // Handle process errors
     child.on('error', (error) => {
+        cleanupSettings?.()
         cleanupMcpConfig?.()
         const promptFailure = query.getPromptFailure()
         if (promptFailure) {
@@ -557,6 +575,7 @@ export function query(config: {
             delete process.env.CLAUDE_SDK_MCP_SERVERS
         }
         cleanupMcpConfig?.()
+        cleanupSettings?.()
     })
 
     return query
