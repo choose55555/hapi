@@ -1,3 +1,4 @@
+import { shouldAutoReturnLocal } from './utils/workbenchAutoLocal';
 import React from "react";
 import { Session } from "./session";
 import { RemoteModeDisplay } from "@/ui/ink/RemoteModeDisplay";
@@ -710,6 +711,13 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                             if (!pending && session.queue.size() === 0) {
                                 session.client.sendSessionEvent({ type: 'ready' });
                                 logger.debug('[claudeRemoteLauncher][async-debug] ready event sent to hub');
+                                if (shouldAutoReturnLocal(this.hasTTY, Boolean(pending), session.queue.size(), Boolean(this.exitReason))) {
+                                    // Do not await abortFuture here: it resolves only after
+                                    // this callback returns and claudeRemote unwinds.
+                                    void this.handleSwitchRequest().catch(error => {
+                                        logger.debug('[remote]: automatic local return failed', error);
+                                    });
+                                }
                             } else {
                                 logger.debug('[claudeRemoteLauncher][async-debug] ready event suppressed (pending input exists)');
                             }

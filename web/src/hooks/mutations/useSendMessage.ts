@@ -1,5 +1,8 @@
+import { MessageSendFailure, sendWithReceipt } from '@/lib/workbenchMessageSend'
+import { forgetSendIdentity, pendingSendIdentity } from '@/lib/pendingSendIdentity'
+import { setSendFailureLabel } from '@/lib/sendFailureLabels'
 import { useMutation } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
 import { makeClientSideId } from '@/lib/messages'
@@ -8,6 +11,7 @@ import {
     getMessageWindowState,
     removeOptimisticMessage,
     updateMessageStatus,
+    subscribeMessageWindow,
 } from '@/lib/message-window-store'
 import { usePlatform } from '@/hooks/usePlatform'
 import type { MessageDeliveryMode } from '@hapi/protocol'
@@ -204,26 +208,63 @@ export function useSendMessage(
     const isSessionThinkingRef = useRef(options?.isSessionThinking ?? false)
     isSessionThinkingRef.current = options?.isSessionThinking ?? false
 
+    // Retain the original identity while the composer restores a failed send.
+    // A retry with identical intent must not create a second server prompt.
+    const readStateScope = typeof api?.getReadStateScope === 'function' ? api.getReadStateScope() : null
+    const failedAttemptsRef = useRef(new Map<string, { localId: string; createdAt: number; sessionId: string; storageKey?: string | null; failed?: boolean; accepted?: boolean }>())
+    const intentKey = (input: Omit<SendMessageInput, 'localId' | 'createdAt'>): string =>
+        JSON.stringify([readStateScope, input.sessionId, input.text, input.attachments ?? [], input.scheduledAt ?? null])
+
+    const optionsRef = useRef(options)
+    optionsRef.current = options
+    useEffect(() => {
+        if (!sessionId) return
+        return subscribeMessageWindow(sessionId, () => {
+            for (const attempt of failedAttemptsRef.current.values()) {
+                if (!attempt.failed || attempt.sessionId !== sessionId) continue
+                const message = findMessageByLocalId(sessionId, attempt.localId)
+                // Only a server sequence is evidence; an optimistic row is not.
+                if (message?.seq == null) continue
+                // The composer may already hold restored text. Retain this id
+                // until that draft is retried or another intent is sent.
+                attempt.failed = false
+                attempt.accepted = true
+                setSendFailureLabel(attempt.localId)
+                updateMessageStatus(sessionId, attempt.localId, typeof message.invokedAt === 'number' ? 'sent' : 'queued')
+                optionsRef.current?.onSuccess?.(sessionId)
+            }
+        })
+    }, [sessionId])
+
     const mutation = useMutation({
         mutationFn: async (input: SendMessageInput) => {
             if (!api) {
                 throw new Error('API unavailable')
             }
-            await api.sendMessage(
-                input.sessionId,
-                input.text,
+            await sendWithReceipt(
+                () => (typeof api.sendMessageWithReceipt === 'function'
+                    ? api.sendMessageWithReceipt.bind(api) : api.sendMessage.bind(api))(
+                    input.sessionId,
+                    input.text,
+                    input.localId,
+                    input.attachments,
+                    input.scheduledAt,
+                    input.deliveryMode,
+                ),
+                () => api.getQueuedState(input.sessionId, [input.localId]),
                 input.localId,
-                input.attachments,
-                input.scheduledAt,
-                input.deliveryMode,
             )
         },
         onMutate: async (input) => {
+            setSendFailureLabel(input.localId)
             const successStatus = isSessionThinkingRef.current ? 'queued' as const : 'sent' as const
             appendOptimisticMessage(input.sessionId, createOptimisticMessage(input, 'sending'))
             return { successStatus }
         },
         onSuccess: (_, input, context) => {
+            forgetSendIdentity(failedAttemptsRef.current.get(intentKey(input))?.storageKey)
+            failedAttemptsRef.current.delete(intentKey(input))
+            setSendFailureLabel(input.localId)
             updateMessageStatus(
                 input.sessionId,
                 input.localId,
@@ -233,6 +274,19 @@ export function useSendMessage(
             options?.onSuccess?.(input.sessionId)
         },
         onError: (error, input) => {
+            const received = findMessageByLocalId(input.sessionId, input.localId)
+            if (received?.seq != null) {
+                forgetSendIdentity(failedAttemptsRef.current.get(intentKey(input))?.storageKey)
+                failedAttemptsRef.current.delete(intentKey(input))
+                setSendFailureLabel(input.localId)
+                optionsRef.current?.onSuccess?.(input.sessionId)
+                return
+            }
+            failedAttemptsRef.current.set(intentKey(input), {
+                storageKey: failedAttemptsRef.current.get(intentKey(input))?.storageKey,
+                localId: input.localId, createdAt: input.createdAt, sessionId: input.sessionId, failed: true
+            })
+            setSendFailureLabel(input.localId, error instanceof MessageSendFailure ? error.message : undefined)
             // Attachment sends keep the legacy failed-bubble UX: the
             // composer-restore path can only re-seat text + scheduledAt,
             // not the uploaded attachment metadata.  Removing the row
@@ -285,8 +339,6 @@ export function useSendMessage(
             options?.onBlocked?.('pending')
             return false
         }
-        const localId = makeClientSideId('local')
-        const createdAt = Date.now()
         let targetSessionId = sessionId
         let sendAttachments = attachments
         if (options?.resolveSessionId) {
@@ -327,7 +379,8 @@ export function useSendMessage(
                 options?.onError?.({
                     sessionId,
                     text,
-                    error,
+                    error: error instanceof TypeError && /load failed|failed to fetch|networkerror/i.test(error.message)
+                        ? new MessageSendFailure(true) : error,
                     scheduledAt: scheduledAt ?? null,
                     deliveryMode,
                     mutationStarted: false,
@@ -338,6 +391,19 @@ export function useSendMessage(
                 setIsResolving(false)
             }
         }
+        const key = intentKey({ sessionId: targetSessionId, text, attachments: sendAttachments, scheduledAt, deliveryMode })
+        for (const [oldKey, attempt] of failedAttemptsRef.current) {
+            if (oldKey !== key && attempt.accepted) {
+                forgetSendIdentity(attempt.storageKey)
+                failedAttemptsRef.current.delete(oldKey)
+            }
+        }
+        const previous = failedAttemptsRef.current.get(key)
+        const identity = previous ?? pendingSendIdentity(readStateScope, key, () => ({
+            localId: makeClientSideId('local'), createdAt: Date.now()
+        }))
+        const { localId, createdAt } = identity
+        failedAttemptsRef.current.set(key, { ...identity, sessionId: targetSessionId, failed: false, accepted: false })
         mutation.mutate({
             sessionId: targetSessionId,
             text,

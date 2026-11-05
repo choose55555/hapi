@@ -3,6 +3,7 @@
  * Manages RPC method registration and handler execution (no encryption).
  */
 
+import { assertWorkbenchReadRpcAllowed, workbenchCommandRpcBlocked, WORKBENCH_NO_SHELL_MESSAGE } from '@/modules/common/workbenchShell'
 import { logger as defaultLogger } from '@/ui/logger'
 import type { RpcHandler, RpcHandlerConfig, RpcHandlerMap, RpcRequest } from './types'
 import type { Socket } from 'socket.io-client'
@@ -41,6 +42,11 @@ export class RpcHandlerManager {
 
     async handleRequest(request: RpcRequest): Promise<string> {
         try {
+            const prefix = `${this.scopePrefix}:`
+            if (request.method.startsWith(prefix)
+                && workbenchCommandRpcBlocked(request.method.slice(prefix.length))) {
+                return JSON.stringify({ success: false, error: WORKBENCH_NO_SHELL_MESSAGE })
+            }
             const handler = this.handlers.get(request.method)
             if (!handler) {
                 this.logger('[RPC] [ERROR] Method not found', { method: request.method })
@@ -48,6 +54,7 @@ export class RpcHandlerManager {
             }
 
             const params = safeJsonParse(request.params)
+            assertWorkbenchReadRpcAllowed(request.method.slice(prefix.length), params)
             const result = await handler(params as any)
             return JSON.stringify(result)
         } catch (error) {

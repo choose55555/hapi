@@ -1,3 +1,4 @@
+import { workbenchEnabled, PERMISSION_LOCK_MESSAGE } from "./utils/workbench";
 import { EnhancedMode, PermissionMode } from "./loop";
 import { query, type QueryOptions as Options, type SDKMessage, type SDKSystemMessage, AbortError, SDKUserMessage } from '@/claude/sdk'
 import { claudeCheckSession } from "./utils/claudeCheckSession";
@@ -13,7 +14,7 @@ import { getSystemPrompt } from "./utils/systemPrompt";
 import { PermissionResult } from "./sdk/types";
 import { getHapiBlobsDir } from "@/constants/uploadPaths";
 import { getDefaultClaudeCodePath } from "./sdk/utils";
-import { filterCatalogAffectingClaudeArgs } from "./sdk/metadataExtractor";
+import { filterRemoteClaudeArgs } from "./sdk/metadataExtractor";
 import { buildCompactCompletionEvent } from "./utils/compactCompletion";
 import { findLatestCompactSummary } from "./utils/compactSummaryLookup";
 
@@ -57,6 +58,7 @@ interface ActiveCompact {
 const EFFORT_APPLY_TIMEOUT_MS = 5_000;
 
 function nativePermissionMode(mode: PermissionMode): PermissionMode {
+    if (workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) return mode;
     return mode === 'acceptEdits' || mode === 'bypassPermissions' ? 'default' : mode;
 }
 
@@ -137,12 +139,12 @@ export async function claudeRemote(opts: {
     }
 
     // Set environment variables for Claude Code SDK
-    if (opts.claudeEnvVars) {
+    if (opts.claudeEnvVars && !workbenchEnabled('HAPI_WORKBENCH_CHILD_ENV')) {
         Object.entries(opts.claudeEnvVars).forEach(([key, value]) => {
             process.env[key] = value;
         });
     }
-    process.env.DISABLE_AUTOUPDATER = '1';
+    if (!workbenchEnabled('HAPI_WORKBENCH_CHILD_ENV')) process.env.DISABLE_AUTOUPDATER = '1';
 
     // Message-level Fork current passes `--fork-session` via claudeArgs from the runner.
     const forkSession = Boolean(opts.claudeArgs?.includes('--fork-session'));
@@ -326,9 +328,15 @@ export async function claudeRemote(opts: {
     // first child prompt so the native fork materializes at the clicked source state.
     const hapiSystemPrompt = getSystemPrompt();
     const sdkOptions: Options = {
-        additionalArgs: filterCatalogAffectingClaudeArgs(opts.claudeArgs),
+        additionalArgs: filterRemoteClaudeArgs(opts.claudeArgs),
         cwd: opts.path,
         resume: startFrom ?? undefined,
+        // SDK query already serializes continue. Once init supplies an identity,
+        // subsequent launches resume that session rather than whichever is latest.
+        // Errors propagate through the existing query/stream error path; no retry
+        // is allowed to silently drop this startup request.
+        ...(workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE') && !opts.sessionId && !startFrom && opts.claudeArgs?.includes('--continue')
+            ? { continue: true } : {}),
         forkSession,
         mcpServers: opts.mcpServers,
         permissionMode: nativePermissionMode(bootstrapMode.permissionMode),
@@ -376,6 +384,14 @@ export async function claudeRemote(opts: {
         sdkOptions.disallowedTools = first.mode.disallowedTools;
     }
 
+    // Resolve startup-only flags after the first message has supplied the final
+    // SDK fallback model. A resumed session keeps its identity unless forking.
+    sdkOptions.additionalArgs = filterRemoteClaudeArgs(opts.claudeArgs, {
+        resume: sdkOptions.resume,
+        forkSession: sdkOptions.forkSession,
+        fallbackModel: sdkOptions.fallbackModel
+    });
+
     // Track thinking state
     let thinking = false;
     const updateThinking = (newThinking: boolean) => {
@@ -394,6 +410,9 @@ export async function claudeRemote(opts: {
         response = query({
             prompt: messages,
             options: sdkOptions,
+            ...(workbenchEnabled('HAPI_WORKBENCH_CHILD_ENV')
+                ? { env: { ...opts.claudeEnvVars, DISABLE_AUTOUPDATER: '1' } }
+                : {}),
         });
     } catch (e) {
         // The initial prompt already opened the steer target.
@@ -408,6 +427,10 @@ export async function claudeRemote(opts: {
     let switchesInFlight = 0;
     let modeChangeSeq = 0;
     opts.setPermissionModeListener?.((next) => {
+        if (workbenchEnabled('HAPI_WORKBENCH_PRESERVE_REMOTE')) {
+            if (next !== requestedMode) opts.onPermissionModeRejected?.(requestedMode, PERMISSION_LOCK_MESSAGE);
+            return;
+        }
         const previous = requestedMode;
         if (next !== previous) {
             modeChangeSeq += 1;

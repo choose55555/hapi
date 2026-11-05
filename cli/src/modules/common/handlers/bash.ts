@@ -1,3 +1,4 @@
+import { workbenchNoShell, WORKBENCH_NO_SHELL_MESSAGE } from '../workbenchShell'
 import { logger } from '@/ui/logger'
 import { exec, type ExecOptions } from 'child_process'
 import { promisify } from 'util'
@@ -24,6 +25,7 @@ interface BashResponse {
 
 export function registerBashHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
     rpcHandlerManager.registerHandler<BashRequest, BashResponse>(RPC_METHODS.Bash, async (data) => {
+        if (workbenchNoShell()) return rpcError(WORKBENCH_NO_SHELL_MESSAGE)
         logger.debug('Shell command request:', data.command)
 
         if (data.cwd) {

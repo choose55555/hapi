@@ -1,3 +1,4 @@
+import { workbenchNoShell, WORKBENCH_NO_SHELL_MESSAGE } from '@/modules/common/workbenchShell'
 type QueueCancelResult = boolean | 'in-flight' | 'indeterminate' | 'consumed'
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
@@ -436,7 +437,7 @@ export class ApiSessionClient extends EventEmitter {
         // Raw keystroke(s) typed by a viewer → write into the agent PTY. No-op
         // (controls null) before the agent is spawned or after it exits.
         this.socket.on('agent-terminal:input', handleTerminalEvent(AgentTerminalInputPayloadSchema, (payload) => {
-            this.agentTerminalSendKeys?.(payload.data)
+            this.handleAgentTerminalInput(payload.data)
         }))
 
         this.socket.on('agent-terminal:refresh', handleTerminalEvent(AgentTerminalRefreshPayloadSchema, () => {
@@ -1273,6 +1274,16 @@ export class ApiSessionClient extends EventEmitter {
     setAgentTerminalControls(controls: { resize: (cols: number, rows: number) => void; sendKeys: (data: string) => void } | null): void {
         this.agentTerminalResize = controls?.resize ?? null
         this.agentTerminalSendKeys = controls?.sendKeys ?? null
+    }
+
+    private handleAgentTerminalInput(data: string): void {
+        if (workbenchNoShell()) {
+            this.socket.emit('terminal:error', {
+                sessionId: this.sessionId, terminalId: 'agent', message: WORKBENCH_NO_SHELL_MESSAGE
+            })
+            return
+        }
+        this.agentTerminalSendKeys?.(data)
     }
 
     // Force the agent TUI to repaint its current screen. A plain same-size resize

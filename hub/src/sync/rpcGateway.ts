@@ -1,3 +1,5 @@
+import { assertWorkbenchSpawnAllowed } from './workbench'
+import { assertWorkbenchReadRpcAllowed, workbenchCommandRpcBlocked, WORKBENCH_NO_SHELL_MESSAGE } from './workbenchShell'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, PermissionMode } from '@hapi/protocol/types'
 import { PERMISSION_REQUEST_NOT_FOUND_MESSAGE, RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
@@ -281,6 +283,7 @@ export class RpcGateway {
             childStarted?: boolean
         }
     > {
+        assertWorkbenchSpawnAllowed()
         try {
             const result = await this.machineRpc(
                 machineId,
@@ -636,6 +639,7 @@ export class RpcGateway {
         sessionId: string,
         params: { messageLocalId?: string }
     ): Promise<import('@hapi/protocol/apiTypes').ForkConversationRpcResponse> {
+        assertWorkbenchSpawnAllowed()
         return await this.sessionRpc(
             sessionId,
             RPC_METHODS.ForkConversation,
@@ -645,6 +649,7 @@ export class RpcGateway {
     }
 
     async forkArchivedCodex(machineId: string, request: import('@hapi/protocol/apiTypes').ForkArchivedCodexRequest): Promise<import('@hapi/protocol/apiTypes').ForkArchivedCodexResponse> {
+        assertWorkbenchSpawnAllowed()
         const result = await this.machineRpc(machineId, RPC_METHODS.ForkArchivedCodex, request, 120_000) as Record<string, unknown>
         if (typeof result?.error === 'string') return { error: result.error, rollbackSafe: result.rollbackSafe === true }
         if (typeof result?.nativeSessionId !== 'string' || !result.nativeSessionId) throw new Error('Native archived fork did not return a session id')
@@ -652,10 +657,12 @@ export class RpcGateway {
     }
 
     async clearConversation(sessionId: string): Promise<{ sessionId: string }> {
+        assertWorkbenchSpawnAllowed()
         return await this.sessionRpc(sessionId, RPC_METHODS.ClearConversation, {}, 120_000) as { sessionId: string }
     }
 
     async implementCodexPlan(sessionId: string, planId: string): Promise<ImplementCodexPlanResult> {
+        assertWorkbenchSpawnAllowed()
         return await this.sessionRpc(sessionId, RPC_METHODS.ImplementCodexPlan, { planId }, 60_000) as ImplementCodexPlanResult
     }
 
@@ -707,6 +714,10 @@ export class RpcGateway {
     }
 
     private async rpcCall(method: string, params: unknown, timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS): Promise<unknown> {
+        if (workbenchCommandRpcBlocked(method.slice(method.lastIndexOf(':') + 1))) {
+            throw new Error(WORKBENCH_NO_SHELL_MESSAGE)
+        }
+        assertWorkbenchReadRpcAllowed(method.slice(method.lastIndexOf(':') + 1), params)
         const socketId = this.rpcRegistry.getSocketIdForMethod(method)
         if (!socketId) {
             throw new RpcTargetMissingError(method, 'handler-not-registered')

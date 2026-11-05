@@ -1,3 +1,4 @@
+import { workbenchGitArgs } from '../workbenchShell'
 import { execFile, type ExecFileOptions } from 'child_process'
 import { promisify } from 'util'
 import type { CommandResponse } from '@hapi/protocol/apiTypes'
@@ -55,7 +56,7 @@ export async function runGitCommand(
             cwd,
             timeout: timeout ?? 10_000
         }
-        const { stdout, stderr } = await execFileAsync('git', args, options)
+        const { stdout, stderr } = await execFileAsync('git', workbenchGitArgs(args), options)
         return {
             success: true,
             stdout: stdout ? stdout.toString() : '',

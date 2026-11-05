@@ -919,6 +919,8 @@ export class MessageService {
             sentFrom?: 'telegram-bot' | 'webapp'
             scheduledAt?: number | null
             deliveryMode?: MessageDeliveryMode
+            /** New web transport explicitly requests durable acceptance without redispatch. */
+            deduplicateDelivery?: boolean
         }
     ): Promise<{ actualSessionId: string; createdAt: number }> {
         // Defence-in-depth invariant for non-REST callers (Telegram bot, MCP,
@@ -964,14 +966,19 @@ export class MessageService {
         )
         const actualSessionId = inserted.sessionId
         const msg = inserted.message
-        // A duplicate localId is an idempotent retry, not proof that the
+        // A legacy duplicate localId is a retry, not proof that the
         // original Pi turn still exists. Its stored row may retain steer
         // provenance from a POST whose response was lost, so deliver the
         // duplicate through the same turn-safe deferred view as reconnect.
         const cliContent = inserted.inserted
             ? msg.content
             : contentForDeferredDelivery(msg.content)
-        const shouldEmitToCli = msg.deliveryState !== 'indeterminate'
+        // The durable (session, localId) row is the acceptance receipt.
+        // A lost HTTP response may cause a POST retry after CLI consumption;
+        // New web sends opt in: never dispatch an accepted prompt twice.
+        // Legacy callers keep their existing deferred-delivery behavior.
+        // Offline delivery remains owned by reconnect/scheduled replay.
+        const shouldEmitToCli = (inserted.inserted || !payload.deduplicateDelivery) && msg.deliveryState !== 'indeterminate'
         this.onSessionActivity?.(actualSessionId, msg.createdAt)
 
         // Only emit to CLI if the message is not scheduled for the future.

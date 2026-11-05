@@ -161,7 +161,9 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             attachments: parsed.data.attachments,
             sentFrom: 'webapp',
             scheduledAt: parsed.data.scheduledAt,
-            deliveryMode: parsed.data.deliveryMode
+            deliveryMode: parsed.data.deliveryMode,
+            // Only new web clients opt in; old callers keep the upstream payload shape.
+            ...(body?.deduplicateDelivery === true ? { deduplicateDelivery: true } : {})
         })
         return c.json({ ok: true })
     })

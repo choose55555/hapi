@@ -1,3 +1,4 @@
+import { workbenchSpawnMiddleware } from '../../sync/workbench'
 import { compareSessionSummaries } from '@hapi/protocol'
 import {
     SessionReadStateRequestSchema,
@@ -84,6 +85,7 @@ function estimateBase64Bytes(base64: string): number {
 
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
+    app.use('*', workbenchSpawnMiddleware)
 
     app.get('/sessions', (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)

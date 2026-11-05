@@ -10,6 +10,7 @@ vi.mock('@/lib/message-window-store', () => ({
     getMessageWindowState: vi.fn(() => ({ messages: [] })),
     updateMessageStatus: vi.fn(),
     removeOptimisticMessage: vi.fn(),
+    subscribeMessageWindow: vi.fn(() => () => {}),
 }))
 
 vi.mock('@/hooks/usePlatform', () => ({
@@ -927,5 +928,101 @@ describe('useSendMessage', () => {
                 'queue',
             )
         })
+    })
+})
+
+describe('workbench identity survives route remount', () => {
+    it('uses the same localId after a failed draft is recreated under the same account', async () => {
+        vi.clearAllMocks()
+        const store = await import('@/lib/message-window-store')
+        vi.mocked(store.getMessageWindowState).mockReturnValue({ messages: [] } as any)
+        const onError = vi.fn()
+        const onSuccess = vi.fn()
+        const send = vi.fn().mockRejectedValueOnce(new TypeError('Load failed')).mockResolvedValue(undefined)
+        const api = {
+            sendMessageWithReceipt: send,
+            getReadStateScope: () => 'fixture-account-remount',
+            getQueuedState: async () => ({ queuedLocalIds: [], indeterminateLocalIds: [], invokedLocalMessages: [] }),
+        } as unknown as ApiClient
+        const first = renderHook(() => useSendMessage(api, 'remount-session', { onError }), { wrapper: createWrapper() })
+        await act(async () => { await first.result.current.sendMessage('restored draft') })
+        await waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+        first.unmount()
+        const second = renderHook(() => useSendMessage(api, 'remount-session', { onSuccess }), { wrapper: createWrapper() })
+        await act(async () => { await second.result.current.sendMessage('restored draft') })
+        await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
+        expect(send.mock.calls[1][2]).toBe(send.mock.calls[0][2])
+        const { makeClientSideId } = await import('@/lib/messages')
+        expect(makeClientSideId).toHaveBeenCalledTimes(1)
+        second.unmount()
+    })
+})
+
+describe('workbench send receipt and retry', () => {
+    beforeEach(() => { vi.clearAllMocks() })
+
+    it('suppresses Safari Load failed when the server has the exact localId', async () => {
+        const onError = vi.fn()
+        const onSuccess = vi.fn()
+        const api = {
+            sendMessage: vi.fn(async () => { throw new TypeError('Load failed') }),
+            getQueuedState: vi.fn(async () => ({ queuedLocalIds: ['local-id-1'], indeterminateLocalIds: [], invokedLocalMessages: [] })),
+        } as unknown as ApiClient
+        const { result } = renderHook(() => useSendMessage(api, 'receipt-session', { onError, onSuccess }), { wrapper: createWrapper() })
+        await act(async () => { await result.current.sendMessage('hello') })
+        await waitFor(() => expect(onSuccess).toHaveBeenCalledWith('receipt-session'))
+        expect(onError).not.toHaveBeenCalled()
+    })
+
+    it('keeps the same id when the failed text is restored and resent', async () => {
+        const onError = vi.fn()
+        const onSuccess = vi.fn()
+        const send = vi.fn()
+            .mockRejectedValueOnce(new TypeError('Load failed'))
+            .mockResolvedValue(undefined)
+        const api = {
+            sendMessage: send,
+            getQueuedState: vi.fn(async () => ({ queuedLocalIds: [], indeterminateLocalIds: [], invokedLocalMessages: [] })),
+        } as unknown as ApiClient
+        const { makeClientSideId } = await import('@/lib/messages')
+        const { result } = renderHook(() => useSendMessage(api, 'retry-session', { onError, onSuccess }), { wrapper: createWrapper() })
+        await act(async () => { await result.current.sendMessage('same text') })
+        await waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+        expect(onError.mock.calls[0][0].error.message).toBe('未发送，点此重发')
+        await waitFor(() => expect(result.current.isSending).toBe(false))
+        await act(async () => { await result.current.sendMessage('same text') })
+        await waitFor(() => expect(onSuccess).toHaveBeenCalledTimes(1))
+        expect(send).toHaveBeenCalledTimes(2)
+        expect(send.mock.calls[1][2]).toBe(send.mock.calls[0][2])
+        expect(makeClientSideId).toHaveBeenCalledTimes(1)
+    })
+
+    it('clears the failed-send notice when a late server message arrives', async () => {
+        const store = await import('@/lib/message-window-store')
+        let listener = () => {}
+        vi.mocked(store.subscribeMessageWindow).mockImplementation((_sessionId, callback) => {
+            listener = callback
+            return () => {}
+        })
+        vi.mocked(store.getMessageWindowState).mockReturnValue({ messages: [] } as any)
+        const onError = vi.fn()
+        const onSuccess = vi.fn()
+        const api = {
+            sendMessage: vi.fn(async () => { throw new TypeError('Load failed') }),
+            getQueuedState: vi.fn(async () => { throw new TypeError('Load failed') }),
+        } as unknown as ApiClient
+        const { result } = renderHook(() => useSendMessage(api, 'late-session', { onError, onSuccess }), { wrapper: createWrapper() })
+        await act(async () => { await result.current.sendMessage('late') })
+        await waitFor(() => expect(onError).toHaveBeenCalledTimes(1))
+        expect(onError.mock.calls[0][0].error.message).toContain('暂时无法确认')
+        vi.mocked(store.getMessageWindowState).mockReturnValue({
+            messages: [{ localId: 'local-id-1', seq: 8, id: 'server-id' }]
+        } as any)
+        act(() => listener())
+        expect(onSuccess).toHaveBeenCalledWith('late-session')
+        act(() => listener())
+        expect(onSuccess).toHaveBeenCalledTimes(1)
+        vi.mocked(store.getMessageWindowState).mockReturnValue({ messages: [] } as any)
+        vi.mocked(store.subscribeMessageWindow).mockImplementation(() => () => {})
     })
 })

@@ -706,6 +706,27 @@ export class ApiClient {
         })
     }
 
+    /** Web v2 send: the durable row acknowledges acceptance, never redispatch. */
+    async sendMessageWithReceipt(
+        sessionId: string,
+        text: string,
+        localId: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        deliveryMode?: MessageDeliveryMode,
+    ): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+            method: 'POST',
+            body: JSON.stringify({
+                text, localId,
+                attachments: attachments ?? undefined,
+                scheduledAt: scheduledAt ?? undefined,
+                deliveryMode: deliveryMode ?? undefined,
+                deduplicateDelivery: true,
+            })
+        })
+    }
+
     async getQueuedState(sessionId: string, localIds: string[]): Promise<QueuedStateResponse> {
         return await this.request<QueuedStateResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/messages/queued-state`,

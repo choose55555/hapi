@@ -1,3 +1,4 @@
+import { assertWorkbenchPermissionChangeAllowed } from './workbench'
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { z } from 'zod'
@@ -166,6 +167,7 @@ export class LocalPermissionBridge {
 
     private respond(raw: unknown): void {
         const response = responseSchema.parse(raw)
+        if (response.mode !== undefined) assertWorkbenchPermissionChangeAllowed()
         const pending = this.pending.get(response.id)
         if (!this.active || !pending || pending.hookSettled) throw new Error('Local request is no longer answerable')
         const input = pending.entry.arguments

@@ -1,3 +1,4 @@
+import { workbenchNoShell, WORKBENCH_NO_SHELL_MESSAGE } from '../../sync/workbenchShell'
 import { TerminalOpenPayloadSchema } from '@hapi/protocol'
 import { z } from 'zod'
 import type { TerminalRegistry, TerminalRegistryEntry } from '../terminalRegistry'
@@ -91,6 +92,10 @@ export function registerTerminalHandlers(socket: SocketWithData, deps: TerminalH
         }
 
         const { sessionId, terminalId, cols, rows } = parsed.data
+        if (workbenchNoShell()) {
+            emitTerminalError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const session = getSession(sessionId)
         if (!namespace || !session || session.namespace !== namespace || !session.active) {
             emitTerminalError(terminalId, 'Session is inactive or unavailable.')
@@ -158,6 +163,10 @@ export function registerTerminalHandlers(socket: SocketWithData, deps: TerminalH
         }
 
         const { terminalId, data: payload } = parsed.data
+        if (workbenchNoShell()) {
+            emitTerminalError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const entry = resolveEntryForSocket(terminalId)
         if (!entry) {
             return
@@ -182,6 +191,10 @@ export function registerTerminalHandlers(socket: SocketWithData, deps: TerminalH
         }
 
         const { terminalId, cols, rows } = parsed.data
+        if (workbenchNoShell()) {
+            emitTerminalError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const entry = resolveEntryForSocket(terminalId)
         if (!entry) {
             return
@@ -322,6 +335,10 @@ export function registerTerminalHandlers(socket: SocketWithData, deps: TerminalH
             return
         }
         const { sessionId, data: keys } = parsed.data
+        if (workbenchNoShell()) {
+            emitTerminalError('agent', WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         if (!isAuthorizedSession(sessionId)) {
             return
         }

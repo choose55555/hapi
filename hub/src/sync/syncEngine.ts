@@ -1,3 +1,4 @@
+import { assertWorkbenchPermissionChangeAllowed, assertWorkbenchSpawnAllowed } from './workbench'
 /**
  * Sync Engine for HAPI Telegram Bot (Direct Connect)
  *
@@ -1119,6 +1120,7 @@ export class SyncEngine {
         | { type: 'success'; message: string }
         | { type: 'error'; message: string; code: 'machine_not_found' | 'machine_offline' | 'restart_unsupported' | 'restart_failed' }
     > {
+        assertWorkbenchSpawnAllowed()
         const machine = this.machineCache.getMachineByNamespace(machineId, namespace)
             ?? this.machineCache.refreshMachine(machineId)
         if (!machine || machine.namespace !== namespace) {
@@ -1262,8 +1264,10 @@ export class SyncEngine {
             sentFrom?: 'telegram-bot' | 'webapp'
             scheduledAt?: number | null
             deliveryMode?: MessageDeliveryMode
+            deduplicateDelivery?: boolean
         }
     ): Promise<void> {
+        if (/^\/(?:clear|new)(?:\s|$)/i.test(payload.text.trim())) assertWorkbenchSpawnAllowed()
         if (this.historyActionsInFlight.has(sessionId)) {
             throw new Error('Conversation history action already in progress')
         }
@@ -1768,6 +1772,7 @@ export class SyncEngine {
         namespace: string,
         messageLocalId?: string
     ): Promise<{ type: 'success'; sessionId: string } | { type: 'error'; message: string }> {
+        assertWorkbenchSpawnAllowed()
         const candidate = this.sessionCache.getSessionByNamespace(sessionId, namespace)
         if (candidate?.metadata?.codexResumePending) {
             return { type: 'error', message: 'Codex resume startup is unconfirmed; retry resume or archive to confirm its process stopped before forking' }
@@ -2402,6 +2407,7 @@ export class SyncEngine {
         namespace: string,
         request: CursorMigrateToAcpRequest
     ): Promise<CursorMigrateOutcome> {
+        assertWorkbenchSpawnAllowed()
         const session = this.sessionCache.getSessionByNamespace(sessionId, namespace)
             ?? this.sessionCache.refreshSession(sessionId)
         if (!session) {
@@ -2482,6 +2488,7 @@ export class SyncEngine {
     }
 
     async clearConversation(sessionId: string, namespace: string): Promise<{ sessionId: string }> {
+        assertWorkbenchSpawnAllowed()
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok || !access.session.active || !access.session.metadata?.capabilities?.concurrentClients) {
             throw new Error('Clear requires an active shared session')
@@ -2494,6 +2501,7 @@ export class SyncEngine {
     }
 
     async implementCodexPlan(sessionId: string, namespace: string, planId: string): Promise<ImplementCodexPlanResult> {
+        assertWorkbenchSpawnAllowed()
         const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
         if (!access.ok || !access.session.active || access.session.metadata?.flavor !== 'codex'
             || !access.session.metadata.capabilities?.concurrentClients) {
@@ -2549,6 +2557,10 @@ export class SyncEngine {
     ): Promise<void> {
         const session = this.sessionCache.getSession(sessionId)
         if (!session?.active) {
+            // No CLI is running: the hub's PRESERVE_REMOTE environment owns this check.
+            if (config.permissionMode !== undefined && config.permissionMode !== session?.permissionMode) {
+                assertWorkbenchPermissionChangeAllowed()
+            }
             // For inactive sessions, update the in-memory cache directly without
             // an RPC call — the CLI is not running yet. The updated value will be
             // passed to the spawned process when the session is resumed.
@@ -2611,6 +2623,7 @@ export class SyncEngine {
         // argv before the first webhook (#1911 Major: unreapable window).
         namespace?: string
     ): ReturnType<RpcGateway['spawnSession']> {
+        assertWorkbenchSpawnAllowed()
         // Fresh machine spawns historically omitted existingSessionId, so
         // buildCliArgs could not stamp --hapi-session-id / --existing-session-id.
         // A runner restart before the first webhook then left no persisted PID
@@ -2736,6 +2749,7 @@ export class SyncEngine {
      * source still owns an in-flight OpenCode turn or native compaction.
      */
     async clearOpenCodeSession(sessionId: string, namespace: string): Promise<ClearOpencodeSessionResult> {
+        assertWorkbenchSpawnAllowed()
         const clearTailKey = `${namespace}:${sessionId}`
         const existing = this.opencodeClearTails.get(clearTailKey)
         if (existing) {
@@ -3555,6 +3569,7 @@ export class SyncEngine {
     }
 
     async resumeSession(sessionId: string, namespace: string, opts?: { permissionMode?: PermissionMode }): Promise<ResumeSessionResult> {
+        assertWorkbenchSpawnAllowed()
         if (this.archivedForkPending(sessionId, namespace)) {
             return { type: 'error', message: 'Archived fork is in progress; retry the fork before reopening', code: 'resume_failed' }
         }
@@ -4061,6 +4076,7 @@ export class SyncEngine {
      * needed to resume is missing.
      */
     async reopenSession(sessionId: string, namespace: string): Promise<ReopenSessionResult> {
+        assertWorkbenchSpawnAllowed()
         if (this.archivedForkPending(sessionId, namespace)) {
             return { type: 'error', message: 'Archived fork is in progress; retry the fork before reopening', code: 'resume_failed' }
         }

@@ -40,7 +40,7 @@ const CO_AUTHORED_CREDITS = (() => trimIdent(`
  * is resolved at call time so hub toggle / env apply after session bootstrap.
  */
 export function getSystemPrompt(): string {
-    const includeCoAuthored = shouldIncludeCoAuthoredBy();
+    const includeCoAuthored = process.env.HAPI_WORKBENCH_NO_ATTRIBUTION !== '1' && shouldIncludeCoAuthoredBy();
     const base = includeCoAuthored
         ? BASE_SYSTEM_PROMPT + '\n\n' + CO_AUTHORED_CREDITS
         : BASE_SYSTEM_PROMPT;

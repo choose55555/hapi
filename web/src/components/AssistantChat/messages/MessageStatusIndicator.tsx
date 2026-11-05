@@ -1,3 +1,4 @@
+import { useSendFailureLabel } from '@/lib/sendFailureLabels'
 import type { MessageStatus } from '@/types/api'
 
 function ErrorIcon() {
@@ -30,8 +31,10 @@ function SendingIcon() {
 
 export function MessageStatusIndicator(props: {
     status?: MessageStatus
+    localId?: string | null
     onRetry?: () => void
 }) {
+    const failureLabel = useSendFailureLabel(props.localId)
     if (props.status === 'queued') {
         return (
             <span role="status" aria-label="Queued" className="inline-flex h-4 w-4 items-center justify-center text-[var(--app-fg-muted)]">
@@ -63,7 +66,7 @@ export function MessageStatusIndicator(props: {
                     onClick={props.onRetry}
                     className="text-xs text-blue-500 hover:underline"
                 >
-                    Retry
+                    {failureLabel ?? 'Retry'}
                 </button>
             ) : null}
         </span>

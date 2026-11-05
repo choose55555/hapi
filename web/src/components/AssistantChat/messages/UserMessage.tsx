@@ -123,7 +123,7 @@ export function HappyUserMessage() {
                     </div>
                     {showStatus && (
                         <div className="happy-message-actions-first-line flex shrink-0 items-center gap-1">
-                            {showStatus ? <MessageStatusIndicator status={status} onRetry={onRetry} /> : null}
+                            {showStatus ? <MessageStatusIndicator status={status} localId={localId} onRetry={onRetry} /> : null}
                         </div>
                     )}
                 </div>

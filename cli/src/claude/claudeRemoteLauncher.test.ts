@@ -1,3 +1,4 @@
+import { RemoteLauncherBase } from '@/modules/common/remote/RemoteLauncherBase'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import { MessageQueue2 } from '@/utils/MessageQueue2'
@@ -10,6 +11,8 @@ import type { EnhancedMode } from './loop'
 // when it has been used and when the user explicitly discards the context.
 const harness = vi.hoisted(() => ({
     callCount: 0,
+    emitReady: false,
+    abortedAfterReady: false,
     claudeArgsPerCall: [] as (string[] | undefined)[],
     initialMessages: [] as string[],
     triggerSwitch: null as (() => void) | null,
@@ -47,6 +50,10 @@ vi.mock('./claudeRemote', () => ({
         // session id via the SDK's system/init message.
         opts.onSessionFound('captured-session-id')
 
+        if (harness.emitReady) {
+            await opts.onReady()
+            harness.abortedAfterReady = opts.signal.aborted
+        }
         if (harness.compactSummary !== null) await opts.onReady(undefined, harness.compactSummary)
         if (harness.compactContextTokens !== null) {
             // Mirrors claudeRemote()'s compact-completion onReady: no
@@ -365,4 +372,43 @@ describe('claudeRemoteLauncher resume anchor', () => {
         } finally { session.stopKeepAlive() }
     })
 
+})
+
+
+describe('workbench automatic return uses the launcher switch path', () => {
+    const original = process.env.HAPI_WORKBENCH_AUTO_LOCAL
+    afterEach(() => {
+        vi.restoreAllMocks()
+        harness.emitReady = false
+        harness.abortedAfterReady = false
+        harness.callCount = 0
+        harness.triggerSwitch = null
+        harness.switchAfterCall = 2
+        if (original === undefined) delete process.env.HAPI_WORKBENCH_AUTO_LOCAL
+        else process.env.HAPI_WORKBENCH_AUTO_LOCAL = original
+    })
+    for (const value of ['1', '0', 'true', '01']) {
+        it('switches after ready only with exact 1: ' + value, async () => {
+            process.env.HAPI_WORKBENCH_AUTO_LOCAL = value
+            // Exercise real launcher callbacks without opening Ink or a child CLI.
+            vi.spyOn(RemoteLauncherBase.prototype as any, 'setupTerminal').mockImplementation(() => {})
+            vi.spyOn(RemoteLauncherBase.prototype as any, 'finalizeTerminal').mockImplementation(() => {})
+            vi.spyOn(RemoteLauncherBase.prototype as any, 'hasTTY', 'get').mockReturnValue(true)
+            harness.emitReady = true
+            harness.callCount = 0
+            harness.compactSummary = null
+            harness.compactContextTokens = null
+            harness.switchAfterCall = 1
+            const client = createClientStub()
+            const { session, queue } = createSession(client, undefined)
+            queue.push('one turn', { permissionMode: 'default' }, 'one-local-id')
+            // Fallback stops old/disabled implementations too, so RED is a
+            // failed signal assertion, not a hanging test or missing process.
+            harness.triggerSwitch = () => { void client.rpcHandlers.get(RPC_METHODS.Switch)?.() }
+            try {
+                await claudeRemoteLauncher(session)
+                expect(harness.abortedAfterReady).toBe(value === '1')
+            } finally { session.stopKeepAlive() }
+        })
+    }
 })

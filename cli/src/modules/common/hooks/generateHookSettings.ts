@@ -3,7 +3,7 @@ import { writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
-import { shellJoin } from '@/modules/common/shellQuote';
+import { claudeHookCommand } from './claudeHookCommand';
 import { LOCAL_PERMISSION_TIMEOUT_SECONDS } from '@/claude/utils/localPermissionProtocol';
 
 type HookCommandConfig = {
@@ -119,7 +119,7 @@ export function generateHookSettingsFile(
         '--token',
         token
     ]);
-    const hookCommand = shellJoin([command, ...args]);
+    const hookCommand = claudeHookCommand([command, ...args]);
 
     const settings = buildHookSettings(
         hookCommand,

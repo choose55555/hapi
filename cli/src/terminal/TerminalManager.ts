@@ -1,3 +1,4 @@
+import { workbenchNoShell, WORKBENCH_NO_SHELL_MESSAGE } from '@/modules/common/workbenchShell'
 import { logger } from '@/ui/logger'
 import { getInvokedCwd } from '@/utils/invokedCwd'
 import type {
@@ -167,6 +168,10 @@ export class TerminalManager {
     }
 
     create(terminalId: string, cols: number, rows: number): void {
+        if (workbenchNoShell()) {
+            this.emitError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const existing = this.terminals.get(terminalId)
         if (existing) {
             existing.cols = cols
@@ -262,6 +267,10 @@ export class TerminalManager {
     }
 
     write(terminalId: string, data: string): void {
+        if (workbenchNoShell()) {
+            this.emitError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const runtime = this.terminals.get(terminalId)
         if (!runtime) {
             this.emitError(terminalId, 'Terminal not found.')
@@ -272,6 +281,10 @@ export class TerminalManager {
     }
 
     resize(terminalId: string, cols: number, rows: number): void {
+        if (workbenchNoShell()) {
+            this.emitError(terminalId, WORKBENCH_NO_SHELL_MESSAGE)
+            return
+        }
         const runtime = this.terminals.get(terminalId)
         if (!runtime) {
             return
