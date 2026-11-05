@@ -34,6 +34,26 @@ function withoutTrackedModelArgs(args: string[]): string[] {
     return filtered;
 }
 
+function withoutSessionIdArgs(args: string[]): string[] {
+    const filtered: string[] = [];
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--session-id') {
+            if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
+                i++;
+            }
+            continue;
+        }
+        if (arg.startsWith('--session-id=')) {
+            continue;
+        }
+        filtered.push(arg);
+    }
+
+    return filtered;
+}
+
 export async function claudeLocal(opts: {
     abort: AbortSignal,
     sessionId: string | null,
@@ -72,9 +92,10 @@ export async function claudeLocal(opts: {
     // Build args for Claude CLI
     const args: string[] = [];
 
-    if (startFrom && !hasUserSessionControl) {
+    const shouldResume = Boolean(startFrom && !hasUserSessionControl);
+    if (shouldResume) {
         // Resume existing session
-        args.push('--resume', startFrom);
+        args.push('--resume', startFrom!);
     }
 
     args.push('--append-system-prompt', stripNewlinesForWindowsShellArg(getSystemPrompt()));
@@ -88,9 +109,14 @@ export async function claudeLocal(opts: {
     }
 
     // Once model state is available, it is authoritative over startup args.
-    const claudeArgs = opts.model === undefined || !opts.claudeArgs
+    let claudeArgs = opts.model === undefined || !opts.claudeArgs
         ? opts.claudeArgs
         : withoutTrackedModelArgs(opts.claudeArgs);
+    if (shouldResume && claudeArgs) {
+        // A startup ID conflicts with --resume unless the user requests a fork.
+        // Strip it only for our automatic resume; preserve explicit user controls.
+        claudeArgs = withoutSessionIdArgs(claudeArgs);
+    }
     if (claudeArgs) {
         args.push(...claudeArgs);
     }

@@ -37,6 +37,19 @@ function isNotBoundError(error: unknown): boolean {
     return error instanceof ApiError && error.status === 401 && error.code === 'not_bound'
 }
 
+function isFetchNetworkError(error: unknown): boolean {
+    return error instanceof TypeError
+        && /^(load failed|failed to fetch|networkerror(?: when attempting to fetch resource\.?)?)$/i.test(error.message)
+}
+
+function authErrorMessage(error: unknown, fallback: string): string {
+    // Match browser fetch failures only; programming and HTTP/auth errors keep their text.
+    if (isFetchNetworkError(error)) {
+        return '连不上电脑，请打开手机上的 Tailscale 再试'
+    }
+    return error instanceof Error ? error.message : fallback
+}
+
 const ACCESS_TOKEN_PREFIX = 'hapi_access_token::'
 
 function rememberAccessToken(baseUrl: string, accessToken: string): void {
@@ -164,7 +177,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
             // already does this for browser/CLI logins via useAuthSource.
             rememberAccessToken(baseUrl, accessToken)
         } catch (error) {
-            setError(error instanceof Error ? error.message : 'Binding failed')
+            setError(authErrorMessage(error, 'Binding failed'))
             throw error
         } finally {
             setIsLoading(false)
@@ -217,7 +230,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                     return
                 }
                 setNeedsBinding(false)
-                setError(e instanceof Error ? e.message : 'Auth failed')
+                setError(authErrorMessage(e, 'Auth failed'))
             } finally {
                 if (!isCancelled) {
                     setIsLoading(false)

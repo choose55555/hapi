@@ -14,6 +14,65 @@ afterEach(() => {
     dirs.splice(0).forEach(dir => rmSync(dir, { recursive: true, force: true }))
 })
 describe('workbench local settings lifecycle', () => {
+    it.each([
+        ['--session-id', 'startup-session'],
+        ['--session-id=startup-session']
+    ])('preserves startup session ID without an existing session: %j', async (...sessionArgs) => {
+        vi.stubEnv('HAPI_WORKBENCH_MERGE_SETTINGS', '0')
+        const claudeArgs = ['--verbose', ...sessionArgs, '--model', 'startup-model']
+        const originalArgs = [...claudeArgs]
+        await claudeLocal({
+            abort: new AbortController().signal, sessionId: null, path: process.cwd(),
+            claudeArgs, hookSettingsPath: 'not-read.json'
+        })
+        const args = (harness.spawn.mock.calls[0][0] as { args: string[] }).args
+        expect(args).not.toContain('--resume')
+        expect(args.slice(args.indexOf('--verbose'), args.indexOf('--verbose') + claudeArgs.length)).toEqual(originalArgs)
+        expect(claudeArgs).toEqual(originalArgs)
+    })
+
+    it.each([
+        ['--session-id', 'startup-session'],
+        ['--session-id=startup-session'],
+        ['--session-id', 'first-session', '--session-id=second-session']
+    ])('removes startup session IDs only when adding automatic resume: %j', async (...sessionArgs) => {
+        vi.stubEnv('HAPI_WORKBENCH_MERGE_SETTINGS', '0')
+        const claudeArgs = ['--verbose', ...sessionArgs, '--model', 'startup-model', '--session-id-file', 'keep.json']
+        const originalArgs = [...claudeArgs]
+        const result = await claudeLocal({
+            abort: new AbortController().signal, sessionId: 'existing-session', path: process.cwd(),
+            claudeArgs, model: 'tracked-model', hookSettingsPath: 'not-read.json'
+        })
+        const args = (harness.spawn.mock.calls[0][0] as { args: string[] }).args
+        expect(args.slice(0, 2)).toEqual(['--resume', 'existing-session'])
+        expect(args.filter(arg => arg === '--resume')).toHaveLength(1)
+        expect(args.some(arg => arg === '--session-id' || arg.startsWith('--session-id='))).toBe(false)
+        for (const value of ['startup-session', 'first-session', 'second-session', 'startup-model']) {
+            expect(args).not.toContain(value)
+        }
+        expect(args.slice(args.indexOf('--verbose'), args.indexOf('--verbose') + 5)).toEqual([
+            '--verbose', '--session-id-file', 'keep.json', '--model', 'tracked-model'
+        ])
+        expect(claudeArgs).toEqual(originalArgs)
+        expect(result).toBe('existing-session')
+    })
+
+    it.each([
+        ['--resume', 'user-session', '--session-id', 'fork-session', '--fork-session'],
+        ['--continue', '--session-id=fork-session', '--fork-session']
+    ])('preserves explicit user session controls: %j', async (...claudeArgs) => {
+        vi.stubEnv('HAPI_WORKBENCH_MERGE_SETTINGS', '0')
+        const originalArgs = [...claudeArgs]
+        await claudeLocal({
+            abort: new AbortController().signal, sessionId: 'existing-session', path: process.cwd(),
+            claudeArgs, hookSettingsPath: 'not-read.json'
+        })
+        const args = (harness.spawn.mock.calls[0][0] as { args: string[] }).args
+        expect(args).not.toContain('existing-session')
+        expect(args.slice(args.indexOf(claudeArgs[0]), args.indexOf(claudeArgs[0]) + claudeArgs.length)).toEqual(originalArgs)
+        expect(claudeArgs).toEqual(originalArgs)
+    })
+
     it.each(['1', '0', 'true'])('passes child-only environment through local spawn, switch=%s', async flag => {
         vi.stubEnv('HAPI_WORKBENCH_CHILD_ENV', flag)
         vi.stubEnv('HAPI_WORKBENCH_MERGE_SETTINGS', '0')
