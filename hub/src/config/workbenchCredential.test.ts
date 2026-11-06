@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { credentialExpiry, credentialGenerationMatches, credentialReminderDue, parseCredentialTtl } from './workbenchCredential'
+import { cliLongTermTokenAllowed, countDelivered, createDistinctWebToken, credentialExpiry, credentialGenerationMatches, credentialReminderDue, deliverReminderToNamespaces, parseCredentialTtl, webLoginTokenMatches } from './workbenchCredential'
 
 describe('workbench credential opt-in policy', () => {
     test('disabled and malformed values preserve upstream policy', () => {
@@ -31,5 +31,33 @@ describe('workbench credential opt-in policy', () => {
         expect(credentialReminderDue(ttl, issued, issued, windowStart)).toBe(false)
         expect(credentialReminderDue(ttl, issued, undefined, issued + ttl)).toBe(false)
         expect(credentialReminderDue(null, issued, undefined, windowStart)).toBe(false)
+    })
+
+    test('web login accepts only the web token when enabled, and the CLI token when disabled', () => {
+        expect(webLoginTokenMatches('web-token', 'cli-token', 'web-token', true)).toBe(true)
+        expect(webLoginTokenMatches('web-token:field', 'cli-token', 'web-token', true)).toBe(true)
+        expect(webLoginTokenMatches('cli-token', 'cli-token', 'web-token', true)).toBe(false)
+        expect(webLoginTokenMatches('web-token', 'cli-token', null, true)).toBe(false)
+        expect(webLoginTokenMatches('cli-token', 'cli-token', 'web-token', false)).toBe(true)
+        expect(webLoginTokenMatches('web-token', 'cli-token', 'web-token', false)).toBe(false)
+    })
+
+    test('cli access stays on the CLI token with no expiry, and rejects the web token only when separated', () => {
+        expect(cliLongTermTokenAllowed('cli-token', 'cli-token', null)).toBe(true)
+        expect(cliLongTermTokenAllowed('other-token', 'cli-token', null)).toBe(false)
+        expect(cliLongTermTokenAllowed('cli-token', 'cli-token', 'web-token')).toBe(true)
+        expect(cliLongTermTokenAllowed('web-token', 'cli-token', 'web-token')).toBe(false)
+        expect(cliLongTermTokenAllowed('web-token:field', 'cli-token', 'web-token')).toBe(false)
+        expect(createDistinctWebToken('cli-token')).not.toBe('cli-token')
+    })
+
+    test('a reminder counts as sent only when one channel reports a delivery', async () => {
+        expect(countDelivered(undefined)).toBe(0)
+        expect(countDelivered(0)).toBe(0)
+        expect(countDelivered({ sent: 0 })).toBe(0)
+        expect(countDelivered({ sent: 2 })).toBe(2)
+        expect(await deliverReminderToNamespaces([], async () => 1)).toBe(false)
+        expect(await deliverReminderToNamespaces(['phone'], async () => 0)).toBe(false)
+        expect(await deliverReminderToNamespaces(['phone'], async () => 1)).toBe(true)
     })
 })

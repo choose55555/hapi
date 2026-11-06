@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto'
+import { constantTimeEquals } from '../utils/crypto'
+import { parseAccessToken } from '../utils/accessToken'
 import { updateSettings, type Settings } from './settings'
 
 export function parseCredentialTtl(raw: string | undefined): number | null {
@@ -16,6 +18,47 @@ export function credentialGenerationMatches(ttlMs: number | null, issuedAt: numb
     return ttlMs === null || (cg === issuedAt && now < issuedAt + ttlMs)
 }
 
+export function createDistinctWebToken(cliApiToken: string | undefined): string {
+    for (let attempt = 0; attempt < 4; attempt++) {
+        const token = randomBytes(32).toString('base64url')
+        if (token !== cliApiToken) return token
+    }
+    throw new Error('Could not generate a distinct web login token')
+}
+
+export function webLoginTokenMatches(presented: string, cliApiToken: string, webToken: string | null, ttlEnabled: boolean): boolean {
+    const parsed = parseAccessToken(presented)
+    if (!parsed) return false
+    const expected = ttlEnabled ? webToken : cliApiToken
+    return typeof expected === 'string' && expected.length > 0 && constantTimeEquals(parsed.baseToken, expected)
+}
+
+/** /cli keeps the upstream comparison. When the TTL switch is on, the phone web token is never accepted. */
+export function cliLongTermTokenAllowed(token: string | null, cliApiToken: string, webToken: string | null): boolean {
+    const parsed = token ? parseAccessToken(token) : null
+    if (!parsed || !constantTimeEquals(parsed.baseToken, cliApiToken)) return false
+    if (webToken !== null && constantTimeEquals(parsed.baseToken, webToken)) return false
+    return true
+}
+
+export function countDelivered(result: unknown): number {
+    if (typeof result === 'number' && Number.isFinite(result) && result > 0) return Math.floor(result)
+    if (result && typeof result === 'object' && 'sent' in result) {
+        const sent = (result as { sent: unknown }).sent
+        if (typeof sent === 'number' && Number.isFinite(sent) && sent > 0) return Math.floor(sent)
+    }
+    return 0
+}
+
+export async function deliverReminderToNamespaces(
+    namespaces: readonly string[],
+    deliver: (namespace: string) => Promise<number>
+): Promise<boolean> {
+    let delivered = 0
+    for (const namespace of namespaces) delivered += await deliver(namespace)
+    return delivered > 0
+}
+
 export function credentialReminderDue(ttlMs: number | null, issuedAt: number, remindedFor: number | undefined, now: number): boolean {
     if (ttlMs === null || remindedFor === issuedAt) return false
     const remaining = issuedAt + ttlMs - now
@@ -24,7 +67,7 @@ export function credentialReminderDue(ttlMs: number | null, issuedAt: number, re
 
 export async function startCredentialReminderChecks(
     credential: WorkbenchCredential | null,
-    send: (expiresAt: number) => Promise<void>,
+    send: (expiresAt: number) => Promise<boolean>,
     timers: { every: (check: () => void, milliseconds: number) => () => void } = {
         every: (check, milliseconds) => {
             const timer = setInterval(check, milliseconds)
@@ -67,13 +110,21 @@ export class WorkbenchCredential {
                 throw new Error('Invalid workbench credential issuance time')
             }
             const issuedAt = issued ?? this.now()
+            let webToken = settings.workbenchWebToken
+            const replaceToken = typeof webToken !== 'string' || webToken.length === 0 || webToken === settings.cliApiToken
+            if (replaceToken) webToken = createDistinctWebToken(settings.cliApiToken)
+            if (typeof webToken !== 'string' || webToken.length === 0) {
+                throw new Error('Could not generate a distinct web login token')
+            }
+            const storedWebToken = webToken
             return {
-                settings: { ...settings, workbenchCredentialIssuedAt: issuedAt },
+                settings: { ...settings, workbenchCredentialIssuedAt: issuedAt, workbenchWebToken: storedWebToken },
                 result: undefined,
-                write: issued === undefined,
+                write: issued === undefined || replaceToken,
                 afterCommit: () => {
                     this.issuedAt = issuedAt
                     this.remindedFor = settings.workbenchCredentialRemindedFor
+                    this.setToken(storedWebToken)
                 }
             }
         })
@@ -131,14 +182,15 @@ export class WorkbenchCredential {
     renew(expectedGeneration: unknown): Promise<{ accessToken: string; expiresAt: number }> {
         return this.serialize(async () => {
             if (!this.accepts(expectedGeneration)) throw new Error('credential_expired')
-            const accessToken = randomBytes(32).toString('base64url')
+            let accessToken = ''
             const issuedAt = Math.max(this.now(), this.issuedAt + 1)
             await updateSettings(this.settingsFile, (settings) => {
                 this.assertGeneration(settings)
+                accessToken = createDistinctWebToken(settings.cliApiToken)
                 return {
                     settings: {
                         ...settings,
-                        cliApiToken: accessToken,
+                        workbenchWebToken: accessToken,
                         workbenchCredentialIssuedAt: issuedAt,
                         workbenchCredentialRemindedFor: undefined
                     },
@@ -165,7 +217,8 @@ export class WorkbenchCredential {
     checkReminder(send: (expiresAt: number) => Promise<void>): Promise<void> {
         return this.serialize(async () => {
             if (!credentialReminderDue(this.ttlMs, this.issuedAt, this.remindedFor, this.now())) return
-            await send(this.expiresAt)
+            const delivered = await send(this.expiresAt)
+            if (delivered !== true) return
             await updateSettings(this.settingsFile, (settings) => {
                 this.assertGeneration(settings)
                 return {

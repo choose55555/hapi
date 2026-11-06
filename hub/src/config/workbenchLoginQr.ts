@@ -30,11 +30,8 @@ export async function printWorkbenchLoginQr(): Promise<void> {
     const ttlMs = parseCredentialTtl(process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS)
     if (ttlMs === null) throw new Error('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
     const settings = await readSettingsOrThrow(getSettingsFile(workbenchDataDir()))
-    const token = settings.cliApiToken
+    const token = settings.workbenchWebToken
     const issuedAt = settings.workbenchCredentialIssuedAt
-    if (typeof token !== 'string' || token.length === 0) {
-        throw new Error('settings.json has no CLI API token')
-    }
     if (issuedAt === undefined || !Number.isSafeInteger(issuedAt) || issuedAt <= 0 || !Number.isSafeInteger(issuedAt + ttlMs)) {
         throw new Error('Invalid workbench credential issuance time')
     }
@@ -43,6 +40,12 @@ export async function printWorkbenchLoginQr(): Promise<void> {
     }
     const publicUrl = process.env.HAPI_PUBLIC_URL?.trim()
     if (!publicUrl) throw new Error('HAPI_PUBLIC_URL is required')
+    if (typeof token !== 'string' || token.length === 0) {
+        throw new Error('settings.json has no web login token')
+    }
+    if (typeof settings.cliApiToken === 'string' && settings.cliApiToken.length > 0 && token === settings.cliApiToken) {
+        throw new Error('Web login token must be distinct from the CLI token; run hapi hub revoke-credential')
+    }
     const directUrl = directAccessUrl(publicUrl, token)
     console.log(`手机登录凭据 ${formatExpiry(issuedAt + ttlMs)} 到期（北京时间）`)
     console.log(directUrl)

@@ -86,6 +86,9 @@ class Configuration {
     /** CLI auth token (shared secret) */
     public workbenchCredential: WorkbenchCredential | null = null
 
+    /** Phone web login token. Empty unless the credential TTL switch is on. */
+    public workbenchWebToken = ''
+
     public cliApiToken: string
 
     /** Source of CLI API token */
@@ -224,7 +227,7 @@ class Configuration {
 
         if (credentialTtl !== null) {
             config.workbenchCredential = new WorkbenchCredential(
-                credentialTtl, config.settingsFile, token => { config.cliApiToken = token }
+                credentialTtl, config.settingsFile, token => { config.workbenchWebToken = token }
             )
             await config.workbenchCredential.initialize()
         }

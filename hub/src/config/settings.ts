@@ -9,6 +9,8 @@ export interface Settings {
     machineIdConfirmedByServer?: boolean
     runnerAutoStartWhenRunningHappy?: boolean
     cliApiToken?: string
+    /** Phone web login token. Separate from cliApiToken while the TTL switch is on. */
+    workbenchWebToken?: string
     workbenchCredentialIssuedAt?: number
     workbenchCredentialRemindedFor?: number
     vapidKeys?: {
@@ -241,9 +243,14 @@ export async function readSettingsOrThrowCached(settingsFile: string): Promise<S
     return settingsOrUnreadable(await readSettingsCached(settingsFile), settingsFile)
 }
 
+/** Drop cached snapshots so a restored settings file is not served from memory. */
+export function forgetSettingsReadCache(): void {
+    defaultSettingsReadCache.clear()
+}
+
 /** @internal isolate the module-level default cache between tests. */
 export function __resetSettingsReadCacheForTests(): void {
-    defaultSettingsReadCache.clear()
+    forgetSettingsReadCache()
 }
 
 /** Per-file in-process promise chain (hub concurrent requests). */

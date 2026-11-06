@@ -2,8 +2,8 @@ import { Hono } from 'hono'
 import { SignJWT } from 'jose'
 import { z } from 'zod'
 import { getConfiguration } from '../../configuration'
-import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
+import { webLoginTokenMatches } from '../../config/workbenchCredential'
 import { validateTelegramInitData } from '../telegramInitData'
 import { getOrCreateOwnerId } from '../../config/ownerId'
 import type { WebAppEnv } from '../middleware/auth'
@@ -14,8 +14,11 @@ const bindBodySchema = z.object({
     accessToken: z.string()
 })
 
-export function createBindRoutes(jwtSecret: Uint8Array, store: Store): Hono<WebAppEnv> {
+export function createBindRoutes(jwtSecret: Uint8Array, store: Store, deps: {
+    getConfiguration?: typeof getConfiguration
+} = {}): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
+    const getConfig = deps.getConfiguration ?? getConfiguration
 
     app.post('/bind', async (c) => {
         const json = await c.req.json().catch(() => null)
@@ -24,11 +27,16 @@ export function createBindRoutes(jwtSecret: Uint8Array, store: Store): Hono<WebA
             return c.json({ error: 'Invalid body' }, 400)
         }
 
-        const configuration = getConfiguration()
+        const configuration = getConfig()
         const credential = configuration.workbenchCredential
         const generation = credential?.generation
         const parsedToken = parseAccessToken(parsed.data.accessToken)
-        if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
+        if (!parsedToken || !webLoginTokenMatches(
+            parsed.data.accessToken,
+            configuration.cliApiToken,
+            configuration.workbenchWebToken ?? null,
+            Boolean(credential)
+        )) {
             return c.json({ error: 'Invalid access token' }, 401)
         }
         if (credential?.expired) return c.json({ error: 'credential_expired' }, 401)

@@ -2,8 +2,8 @@ import { Hono } from 'hono'
 import { SignJWT } from 'jose'
 import { AuthRequestSchema } from '@hapi/protocol'
 import { getConfiguration } from '../../configuration'
-import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
+import { webLoginTokenMatches } from '../../config/workbenchCredential'
 import { validateTelegramInitData } from '../telegramInitData'
 import { getOrCreateOwnerId } from '../../config/ownerId'
 import type { WebAppEnv } from '../middleware/auth'
@@ -32,11 +32,16 @@ export function createAuthRoutes(jwtSecret: Uint8Array, store: Store, deps: {
         let lastName: string | undefined
         let namespace: string
 
-        // Access Token authentication (CLI_API_TOKEN)
+        // Access token: the CLI token when the TTL switch is off, the web token when it is on.
         if ('accessToken' in parsed.data) {
             const configuration = getConfig()
             const parsedToken = parseAccessToken(parsed.data.accessToken)
-            if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
+            if (!parsedToken || !webLoginTokenMatches(
+                parsed.data.accessToken,
+                configuration.cliApiToken,
+                configuration.workbenchWebToken ?? null,
+                Boolean(credential)
+            )) {
                 return c.json({ error: 'Invalid access token' }, 401)
             }
             if (credential?.expired) {

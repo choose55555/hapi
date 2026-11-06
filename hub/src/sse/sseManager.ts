@@ -302,6 +302,16 @@ export class SSEManager {
         }
     }
 
+    disconnectAll(): void {
+        for (const connection of [...this.connections.values()]) {
+            try {
+                connection.close?.()
+            } catch {
+                console.error('[Hub] Event stream close failed')
+            }
+        }
+    }
+
     stop(): void {
         this.stopHeartbeat()
         for (const id of this.connections.keys()) {

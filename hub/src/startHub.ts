@@ -1,5 +1,5 @@
 import { acquireCredentialLease, workbenchDataDir } from './config/workbenchCredentialLease'
-import { parseCredentialTtl, startCredentialReminderChecks } from './config/workbenchCredential'
+import { countDelivered, deliverReminderToNamespaces, parseCredentialTtl, startCredentialReminderChecks } from './config/workbenchCredential'
 import type { IosPushNotificationPayload } from './push-ios/iosPushService'
 import { createConfiguration, type ConfigSource } from './configuration'
 import { Store } from './store'
@@ -448,15 +448,16 @@ async function startHubInternal(options: StartHubOptions): Promise<HubInstance> 
                 body: `将于 ${formatted} 到期（北京时间）。点开后按“换新凭据”。`,
                 contractVersion: '1', severity: 'warning'
             }
-            for (const namespace of store.push.getCredentialReminderNamespaces()) {
-                await Promise.all([
+            return deliverReminderToNamespaces(store.push.getCredentialReminderNamespaces(), async namespace => {
+                const counts = await Promise.all([
                     pushService.sendToNamespace(namespace, {
                         title: payload.title, body: payload.body, tag: 'credential-expiring',
                         data: { type: payload.type, sessionId: '', url: '/settings' }
-                    }),
-                    ...credentialSenders.map(send => send(namespace, payload))
+                    }).then(count => count, () => 0),
+                    ...credentialSenders.map(send => Promise.resolve(send(namespace, payload)).then(countDelivered, () => 0))
                 ])
-            }
+                return counts.reduce((sum, count) => sum + count, 0)
+            })
         })
     }
 

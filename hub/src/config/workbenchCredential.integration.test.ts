@@ -5,13 +5,18 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { Hono } from 'hono'
 import { SignJWT, decodeJwt } from 'jose'
-import { WorkbenchCredential, startCredentialReminderChecks } from './workbenchCredential'
+import { cliLongTermTokenAllowed, WorkbenchCredential, startCredentialReminderChecks } from './workbenchCredential'
 import { readSettingsOrThrow, updateSettings } from './settings'
 import { createAuthMiddleware, type WebAppEnv } from '../web/middleware/auth'
 import { createWorkbenchCredentialRoutes } from '../web/routes/workbenchCredential'
 import { verifyTerminalJwt } from '../socket/server'
 import { acquireCredentialLease } from './workbenchCredentialLease'
 import { createAuthRoutes } from '../web/routes/auth'
+import { createBindRoutes } from '../web/routes/bind'
+import { createCliCredentialGuard } from '../web/cliCredentialGuard'
+import { bindCredentialDisconnect, disconnectCredentialClients } from '../web/credentialDisconnect'
+import { SSEManager } from '../sse/sseManager'
+import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { getConfiguration } from '../configuration'
 import type { Store } from '../store'
 
@@ -25,13 +30,19 @@ async function fixture() {
     directories.push(directory)
     const settingsFile = join(directory, 'settings.json')
     let now = 1_800_000_000_000
-    let currentToken = 'test-only-original-value'
+    const cliToken = 'test-only-cli-token'
+    let webToken = ''
     await updateSettings(settingsFile, settings => ({
-        settings: { ...settings, cliApiToken: currentToken, publicUrl: 'http://localhost' }, result: undefined
+        settings: { ...settings, cliApiToken: cliToken, publicUrl: 'http://localhost' }, result: undefined
     }))
-    const credential = new WorkbenchCredential(30 * 86_400_000, settingsFile, token => { currentToken = token }, () => now)
+    const credential = new WorkbenchCredential(30 * 86_400_000, settingsFile, token => { webToken = token }, () => now)
     await credential.initialize()
-    return { directory, settingsFile, credential, getToken: () => currentToken, setNow: (value: number) => { now = value } }
+    return {
+        directory, settingsFile, credential, cliToken,
+        getWebToken: () => webToken,
+        getToken: () => webToken,
+        setNow: (value: number) => { now = value }
+    }
 }
 
 describe('workbench credential persistence and actual HTTP/socket JWT checks', () => {
@@ -61,16 +72,16 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
             delays.push(milliseconds)
             return () => { stopped = true }
         } }
-        await startCredentialReminderChecks(null, async () => { sends++ }, timers)
+        await startCredentialReminderChecks(null, async () => { sends++; return true }, timers)
         expect(callbacks).toHaveLength(0)
-        const stop = await startCredentialReminderChecks(f.credential, async () => { sends++ }, timers)
+        const stop = await startCredentialReminderChecks(f.credential, async () => { sends++; return true }, timers)
         expect(sends).toBe(0)
         expect(delays).toEqual([3_600_000])
         f.setNow(f.credential.expiresAt - 3_600_000)
         callbacks[0]!()
         // checkReminder serializes with the scheduled callback; waiting for a
         // second check drains the same chain without relying on wall-clock sleeps.
-        await f.credential.checkReminder(async () => { sends++ })
+        await f.credential.checkReminder(async () => { sends++; return true })
         expect(sends).toBe(1)
         stop()
         expect(stopped).toBe(true)
@@ -79,7 +90,8 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         const f = await fixture()
         const secret = randomBytes(32)
         const configuration = {
-            get cliApiToken() { return f.getToken() },
+            get cliApiToken() { return f.cliToken },
+            get workbenchWebToken() { return f.getWebToken() },
             workbenchCredential: f.credential,
             telegramEnabled: false
         } as ReturnType<typeof getConfiguration>
@@ -90,6 +102,7 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accessToken })
         })
         f.setNow(Date.now())
+        expect((await login(f.cliToken)).status).toBe(401)
         const normal = await login(f.getToken())
         const normalClaims = decodeJwt((await normal.json() as { token: string }).token)
         expect((normalClaims.exp ?? Infinity) - (normalClaims.iat ?? 0)).toBeLessThanOrEqual(4 * 3600)
@@ -107,13 +120,20 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         const expired = await login(result.accessToken)
         expect(expired.status).toBe(401)
         expect(await expired.json()).toEqual({ error: 'credential_expired' })
+        expect(cliLongTermTokenAllowed(f.cliToken, f.cliToken, f.getWebToken())).toBe(true)
+        expect(cliLongTermTokenAllowed(f.getWebToken(), f.cliToken, f.getWebToken())).toBe(false)
     })
     test('missing issuance is persisted once; restarting retains it and unrelated settings', async () => {
         const f = await fixture()
-        expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialIssuedAt).toBe(f.credential.generation)
+        const saved = await readSettingsOrThrow(f.settingsFile)
+        expect(saved.workbenchCredentialIssuedAt).toBe(f.credential.generation)
+        expect(saved.workbenchWebToken).toBe(f.getWebToken())
+        expect(saved.cliApiToken).toBe(f.cliToken)
+        expect(saved.workbenchWebToken).not.toBe(f.cliToken)
         const restarted = new WorkbenchCredential(f.credential.ttlMs, f.settingsFile, () => {}, () => f.credential.generation + 1000)
         await restarted.initialize()
         expect(restarted.generation).toBe(f.credential.generation)
+        expect((await readSettingsOrThrow(f.settingsFile)).workbenchWebToken).toBe(saved.workbenchWebToken)
         expect((await readSettingsOrThrow(f.settingsFile)).publicUrl).toBe('http://localhost')
     })
 
@@ -127,7 +147,8 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         expect(result.accessToken).not.toBe(old)
         expect(result.accessToken.length).toBe(43)
         expect(f.getToken()).toBe(result.accessToken)
-        expect((await readSettingsOrThrow(f.settingsFile)).cliApiToken).toBe(result.accessToken)
+        expect((await readSettingsOrThrow(f.settingsFile)).workbenchWebToken).toBe(result.accessToken)
+        expect((await readSettingsOrThrow(f.settingsFile)).cliApiToken).toBe(f.cliToken)
         expect(f.credential.accepts(generation)).toBe(false)
         expect(disconnected).toBe(true)
         await expect(f.credential.renew(generation)).rejects.toThrow('credential_expired')
@@ -188,7 +209,7 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
     test('one reminder per generation, including across restarts; none outside window', async () => {
         const f = await fixture()
         let sends = 0
-        const send = async () => { sends++ }
+        const send = async () => { sends++; return true }
         await f.credential.checkReminder(send)
         expect(sends).toBe(0)
         f.setNow(f.credential.expiresAt - 48 * 3_600_000)
@@ -209,7 +230,9 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         f.setNow(f.credential.expiresAt - 1000)
         await expect(f.credential.checkReminder(async () => { throw new Error('test transport failure') })).rejects.toThrow('test transport failure')
         expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialRemindedFor).toBeUndefined()
-        await f.credential.checkReminder(async () => {})
+        await f.credential.checkReminder(async () => false)
+        expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialRemindedFor).toBeUndefined()
+        await f.credential.checkReminder(async () => true)
         expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialRemindedFor).toBe(f.credential.generation)
         await f.credential.renew(f.credential.generation)
         expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialRemindedFor).toBeUndefined()
@@ -229,5 +252,141 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         }
         const next = await acquireCredentialLease(f.directory)
         await next()
+    })
+
+    test('disabled web login still accepts the CLI token and ignores a separate web token', async () => {
+        const secret = randomBytes(32)
+        const configuration = {
+            cliApiToken: 'test-only-cli-token',
+            workbenchWebToken: 'test-only-web-token',
+            workbenchCredential: null,
+            telegramEnabled: false
+        } as ReturnType<typeof getConfiguration>
+        const app = createAuthRoutes(secret, {} as Store, {
+            getConfiguration: () => configuration, getOwnerId: async () => 1
+        })
+        const login = (accessToken: string) => app.request('/auth', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accessToken })
+        })
+        expect((await login('test-only-cli-token')).status).toBe(200)
+        expect((await login('test-only-web-token')).status).toBe(401)
+        const bind = createBindRoutes(secret, {} as Store, { getConfiguration: () => configuration })
+        const bindWith = (accessToken: string) => bind.request('/bind', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: 'x', accessToken })
+        })
+        expect((await bindWith('test-only-cli-token')).status).toBe(503)
+        expect((await bindWith('test-only-web-token')).status).toBe(401)
+    })
+
+    test('enabled bind accepts the web token and rejects the CLI token', async () => {
+        const f = await fixture()
+        const secret = randomBytes(32)
+        const configuration = {
+            get cliApiToken() { return f.cliToken },
+            get workbenchWebToken() { return f.getWebToken() },
+            workbenchCredential: f.credential,
+            telegramEnabled: false
+        } as ReturnType<typeof getConfiguration>
+        const bind = createBindRoutes(secret, {} as Store, { getConfiguration: () => configuration })
+        const bindWith = (accessToken: string) => bind.request('/bind', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: 'x', accessToken })
+        })
+        expect((await bindWith(f.getWebToken())).status).toBe(503)
+        expect((await bindWith(f.cliToken)).status).toBe(401)
+    })
+
+    test('cli guard rejects the web token only while the switch is on', async () => {
+        const downstream = { called: false }
+        const build = (enabled: boolean) => {
+            const app = new Hono()
+            app.use('*', createCliCredentialGuard(() => ({
+                enabled, webToken: 'test-only-web-token'
+            })))
+            app.post('/cli/sessions', c => {
+                downstream.called = true
+                const token = (c.req.header('authorization') ?? '').replace(/^Bearer\s+/i, '')
+                if (token !== 'test-only-cli-token') return c.json({ error: 'Invalid token' }, 401)
+                return c.json({ ok: true })
+            })
+            return app
+        }
+        const call = (app: Hono, token: string) => app.request('/cli/sessions', {
+            method: 'POST', headers: { authorization: `Bearer ${token}` }
+        })
+        downstream.called = false
+        expect((await call(build(true), 'test-only-web-token')).status).toBe(401)
+        expect(downstream.called).toBe(false)
+        downstream.called = false
+        expect((await call(build(true), 'test-only-cli-token')).status).toBe(200)
+        expect(downstream.called).toBe(true)
+        downstream.called = false
+        expect((await call(build(false), 'test-only-web-token')).status).toBe(401)
+        expect(downstream.called).toBe(true)
+        expect((await call(build(false), 'test-only-cli-token')).status).toBe(200)
+    })
+
+    test('renewal and expiry close event streams; a disabled credential does not', async () => {
+        const f = await fixture()
+        let events = 0
+        let voice = 0
+        bindCredentialDisconnect(f.credential, () => {
+            disconnectCredentialClients([{ close() { voice++ } }], { disconnectAll() { events++ } })
+        })
+        await f.credential.renew(f.credential.generation)
+        expect(events).toBe(1)
+        expect(voice).toBe(1)
+        const pending: Array<() => void> = []
+        f.setNow(f.credential.expiresAt - 10)
+        const stop = f.credential.watchExpiry((_delay, callback) => {
+            pending.push(callback)
+            return () => {}
+        })
+        f.setNow(f.credential.expiresAt)
+        pending[0]!()
+        expect(events).toBe(2)
+        expect(voice).toBe(2)
+        stop()
+        let disabled = 0
+        bindCredentialDisconnect(null, () => { disabled++ })
+        expect(disabled).toBe(0)
+
+        let closed = 0
+        const manager = new SSEManager(0, {
+            registerConnection() {},
+            removeConnection() {}
+        } as unknown as VisibilityTracker)
+        manager.subscribe({
+            id: 'stream-1', namespace: 'default', send() {}, sendHeartbeat() {},
+            close: () => { closed++ }
+        })
+        manager.disconnectAll()
+        expect(closed).toBe(1)
+        manager.stop()
+    })
+
+    test('an equal stored web token is replaced without changing the CLI token or issuance time', async () => {
+        const directory = await mkdtemp(join(tmpdir(), 'hapi-credential-test-'))
+        directories.push(directory)
+        const settingsFile = join(directory, 'settings.json')
+        await updateSettings(settingsFile, settings => ({
+            settings: {
+                ...settings,
+                cliApiToken: 'test-only-same-value',
+                workbenchWebToken: 'test-only-same-value',
+                workbenchCredentialIssuedAt: 5
+            },
+            result: undefined
+        }))
+        let seen = ''
+        const credential = new WorkbenchCredential(30 * 86_400_000, settingsFile, token => { seen = token }, () => 5)
+        await credential.initialize()
+        const saved = await readSettingsOrThrow(settingsFile)
+        expect(saved.cliApiToken).toBe('test-only-same-value')
+        expect(saved.workbenchWebToken).not.toBe('test-only-same-value')
+        expect(saved.workbenchWebToken).toBe(seen)
+        expect(saved.workbenchCredentialIssuedAt).toBe(5)
+        expect(credential.generation).toBe(5)
     })
 })

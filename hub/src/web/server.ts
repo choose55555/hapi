@@ -27,6 +27,8 @@ import { createUsageRoutes } from './routes/usage'
 import { createActivityRoutes } from './routes/activity'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
+import { createCliCredentialGuard } from './cliCredentialGuard'
+import { bindCredentialDisconnect, disconnectCredentialClients } from './credentialDisconnect'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createOpencodeSessionRoutes } from './routes/opencodeSessions'
@@ -283,6 +285,10 @@ function createWebApp(options: {
         return next()
     })
 
+    app.use('/cli/*', createCliCredentialGuard(() => ({
+        enabled: configuration.workbenchCredential !== null,
+        webToken: configuration.workbenchWebToken
+    })))
     app.route('/cli', createCliRoutes(options.getSyncEngine))
 
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
@@ -455,8 +461,8 @@ export async function startWebServer(options: {
     const socketHandler = options.socketEngine.handler()
 
     const credentialSockets = new Set<ServerWebSocket<unknown>>()
-    configuration.workbenchCredential?.onRotate(() => {
-        for (const socket of credentialSockets) socket.close(1008, 'Credential changed')
+    bindCredentialDisconnect(configuration.workbenchCredential, () => {
+        disconnectCredentialClients(credentialSockets, options.getSseManager())
     })
 
     // Wrap socket.io websocket handler to also support Gemini/Qwen proxy connections
