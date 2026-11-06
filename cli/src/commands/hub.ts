@@ -32,6 +32,12 @@ export const hubCommand: CommandDefinition = {
                 console.log('Mobile login credential revoked. Start the hub to pair again.')
                 return
             }
+            if (context.commandArgs[0] === 'login-qr') {
+                if (context.commandArgs.length !== 1) throw new Error('login-qr does not accept service options')
+                const { printWorkbenchLoginQr } = await import('hapi-hub/startHub')
+                await printWorkbenchLoginQr()
+                return
+            }
             const { host, port } = parseHubArgs(context.commandArgs)
 
             if (host) {

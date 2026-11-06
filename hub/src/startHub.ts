@@ -34,6 +34,7 @@ import type { Server as BunServer } from 'bun'
 import type { WebSocketData } from '@socket.io/bun-engine'
 
 export { revokeWorkbenchCredential } from './config/workbenchCredentialLease'
+export { printWorkbenchLoginQr } from './config/workbenchLoginQr'
 
 /** Format config source for logging */
 function formatSource(source: ConfigSource | 'generated'): string {
