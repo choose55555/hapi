@@ -1,342 +1,92 @@
-import { expect, test, vi } from 'vitest'
-
-const spyOn = vi.spyOn
-import { mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { createServer } from 'node:net'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { hubCommand } from './hub'
 import type { CommandContext } from './types'
 
-test('offline command rotates token, issuance and JWT secret and prints no credential', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-offline-revoke-'))
-    const prior = { home: process.env.HAPI_HOME, ttl: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS, token: process.env.CLI_API_TOKEN, port: process.env.HAPI_LISTEN_PORT, host: process.env.HAPI_LISTEN_HOST }
-    const oldToken = 'test-only-old-credential'
-    const oldSecret = Buffer.alloc(32, 7).toString('base64')
-    // Port 0 lets the operating system choose a free local probe port.
-    await writeFile(join(directory, 'settings.json'), JSON.stringify({ cliApiToken: oldToken, workbenchCredentialIssuedAt: 1000, listenPort: 0 }))
-    await writeFile(join(directory, 'jwt-secret.json'), JSON.stringify({ secretBase64: oldSecret }))
-    process.env.HAPI_HOME = directory
-    process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS = '30'
-    delete process.env.CLI_API_TOKEN
-    delete process.env.HAPI_LISTEN_PORT
-    process.env.HAPI_LISTEN_HOST = '127.0.0.1'
-    const log = spyOn(console, 'log').mockImplementation(() => {})
-    try {
-        await hubCommand.run({ commandArgs: ['revoke-credential'] } as CommandContext)
-        const settings = JSON.parse(await readFile(join(directory, 'settings.json'), 'utf8'))
-        const secret = JSON.parse(await readFile(join(directory, 'jwt-secret.json'), 'utf8'))
-        expect(settings.cliApiToken).toBe(oldToken)
-        expect(settings.workbenchWebToken).not.toBe(oldToken)
-        expect(typeof settings.workbenchWebToken).toBe('string')
-        expect(settings.workbenchWebToken.length).toBeGreaterThan(0)
-        expect(settings.workbenchCredentialIssuedAt).toBeGreaterThan(1000)
-        expect(secret.secretBase64).not.toBe(oldSecret)
-        expect(log.mock.calls).toHaveLength(1)
-        const printed = JSON.stringify(log.mock.calls)
-        expect(printed).not.toContain(oldToken)
-        expect(printed).not.toContain(settings.workbenchWebToken)
-        expect(printed).not.toContain(secret.secretBase64)
-        expect(printed).toContain('revoked')
-    } finally {
-        log.mockRestore()
-        for (const [key, value] of Object.entries({ HAPI_HOME: prior.home, HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: prior.ttl, CLI_API_TOKEN: prior.token, HAPI_LISTEN_PORT: prior.port, HAPI_LISTEN_HOST: prior.host })) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-})
+const hub = vi.hoisted(() => ({
+    revokeWorkbenchCredential: vi.fn<() => Promise<void>>(),
+    printWorkbenchLoginQr: vi.fn<() => Promise<void>>(),
+    startHub: vi.fn()
+}))
 
-test('running legacy hub port refuses revocation without changing either credential file', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-revoke-running-'))
-    const prior = { home: process.env.HAPI_HOME, ttl: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS, token: process.env.CLI_API_TOKEN, port: process.env.HAPI_LISTEN_PORT, host: process.env.HAPI_LISTEN_HOST }
-    const server = createServer()
-    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
-    const address = server.address()
-    if (!address || typeof address === 'string') throw new Error('Missing test port')
-    const originalSettings = JSON.stringify({ cliApiToken: 'test-only-unchanged', workbenchCredentialIssuedAt: 1000, listenPort: address.port })
-    const originalSecret = JSON.stringify({ secretBase64: Buffer.alloc(32, 1).toString('base64') })
-    await writeFile(join(directory, 'settings.json'), originalSettings)
-    await writeFile(join(directory, 'jwt-secret.json'), originalSecret)
-    process.env.HAPI_HOME = directory
-    process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS = '30'
-    delete process.env.CLI_API_TOKEN
-    delete process.env.HAPI_LISTEN_PORT
-    process.env.HAPI_LISTEN_HOST = '127.0.0.1'
-    try {
-        const { revokeWorkbenchCredential } = await import('hapi-hub/startHub')
-        await expect(revokeWorkbenchCredential()).rejects.toThrow('Hub port is in use')
-        expect(await readFile(join(directory, 'settings.json'), 'utf8')).toBe(originalSettings)
-        expect(await readFile(join(directory, 'jwt-secret.json'), 'utf8')).toBe(originalSecret)
-    } finally {
-        await new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()) })
-        for (const [key, value] of Object.entries({ HAPI_HOME: prior.home, HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: prior.ttl, CLI_API_TOKEN: prior.token, HAPI_LISTEN_PORT: prior.port, HAPI_LISTEN_HOST: prior.host })) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-})
+// Do not load the Bun-only hub implementation into Vitest's Node runtime.
+vi.mock('hapi-hub/startHub', () => hub)
 
-test('revoke is refused when the ttl switch is off and neither credential file changes', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-revoke-off-'))
-    const prior = { home: process.env.HAPI_HOME, ttl: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS, token: process.env.CLI_API_TOKEN }
-    const originalSettings = JSON.stringify({ cliApiToken: 'test-only-cli-token', workbenchWebToken: 'test-only-web-token' })
-    const originalSecret = JSON.stringify({ secretBase64: Buffer.alloc(32, 5).toString('base64') })
-    await writeFile(join(directory, 'settings.json'), originalSettings)
-    await writeFile(join(directory, 'jwt-secret.json'), originalSecret)
-    process.env.HAPI_HOME = directory
-    delete process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS
-    delete process.env.CLI_API_TOKEN
-    try {
-        const { revokeWorkbenchCredential } = await import('hapi-hub/startHub')
-        await expect(revokeWorkbenchCredential()).rejects.toThrow('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
-        expect(await readFile(join(directory, 'settings.json'), 'utf8')).toBe(originalSettings)
-        expect(await readFile(join(directory, 'jwt-secret.json'), 'utf8')).toBe(originalSecret)
-    } finally {
-        for (const [key, value] of Object.entries({ HAPI_HOME: prior.home, HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: prior.ttl, CLI_API_TOKEN: prior.token })) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-})
-
-function formatExpiry(expiresAt: number): string {
-    return new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
-    }).format(expiresAt)
-}
-
-async function withLoginQr(
-    options: { settings: Record<string, unknown>; ttl?: string; publicUrl?: string },
-    run: (captured: { output: () => string; logs: () => string[] }) => Promise<void>
-): Promise<void> {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-login-qr-'))
-    const prior = {
-        HAPI_HOME: process.env.HAPI_HOME,
-        HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS,
-        CLI_API_TOKEN: process.env.CLI_API_TOKEN,
-        HAPI_LISTEN_PORT: process.env.HAPI_LISTEN_PORT,
-        HAPI_LISTEN_HOST: process.env.HAPI_LISTEN_HOST,
-        HAPI_PUBLIC_URL: process.env.HAPI_PUBLIC_URL
-    }
-    const original = JSON.stringify(options.settings)
-    await writeFile(join(directory, 'settings.json'), original)
-    process.env.HAPI_HOME = directory
-    delete process.env.CLI_API_TOKEN
-    delete process.env.HAPI_LISTEN_PORT
-    process.env.HAPI_LISTEN_HOST = '127.0.0.1'
-    if (options.ttl === undefined) delete process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS
-    else process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS = options.ttl
-    if (options.publicUrl === undefined) delete process.env.HAPI_PUBLIC_URL
-    else process.env.HAPI_PUBLIC_URL = options.publicUrl
-    const log = spyOn(console, 'log').mockImplementation(() => {})
-    const error = spyOn(console, 'error').mockImplementation(() => {})
-    const exitSpy = spyOn(process, 'exit').mockImplementation(((code?: number) => {
-        throw new Error(`process.exit:${code ?? 'undefined'}`)
-    }) as typeof process.exit)
-    try {
-        await run({
-            output: () => JSON.stringify([...log.mock.calls, ...error.mock.calls]),
-            logs: () => log.mock.calls.map(call => String(call[0] ?? ''))
-        })
-        expect(await readFile(join(directory, 'settings.json'), 'utf8')).toBe(original)
-        expect(await readdir(directory)).toEqual(['settings.json'])
-    } finally {
-        log.mockRestore()
-        error.mockRestore()
-        exitSpy.mockRestore()
-        for (const [key, value] of Object.entries(prior)) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-}
-
-test('login-qr is unavailable when the credential ttl switch is off', async () => {
-    const token = 'test-only-login-token'
-    await withLoginQr({
-        settings: { cliApiToken: token, workbenchCredentialIssuedAt: Date.now() },
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
-        expect(output()).not.toContain(token)
-        expect(output()).not.toContain('HAPI Hub starting')
+beforeEach(() => {
+    vi.resetAllMocks()
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit:1')
     })
 })
 
-test('expired login-qr prints no token and exits non-zero', async () => {
-    const token = 'test-only-expired-token'
-    await withLoginQr({
-        settings: { cliApiToken: token, workbenchCredentialIssuedAt: 1 },
-        ttl: '30',
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('凭据已过期，请先运行 hapi hub revoke-credential 换新')
-        expect(output()).not.toContain(token)
+afterEach(() => {
+    vi.restoreAllMocks()
+})
+
+test('revoke-credential dispatches once and prints one credential-free result', async () => {
+    hub.revokeWorkbenchCredential.mockResolvedValue(undefined)
+
+    await hubCommand.run({ commandArgs: ['revoke-credential'] } as CommandContext)
+
+    expect(hub.revokeWorkbenchCredential).toHaveBeenCalledTimes(1)
+    expect(hub.revokeWorkbenchCredential).toHaveBeenCalledWith()
+    expect(hub.printWorkbenchLoginQr).not.toHaveBeenCalled()
+    expect(hub.startHub).not.toHaveBeenCalled()
+    expect(console.log).toHaveBeenCalledTimes(1)
+    expect(console.log).toHaveBeenCalledWith(
+        'Mobile login credential revoked. Start the hub to pair again.'
+    )
+    expect(console.error).not.toHaveBeenCalled()
+    expect(process.exit).not.toHaveBeenCalled()
+})
+
+test('login-qr dispatches once and adds no output to the printer result', async () => {
+    hub.printWorkbenchLoginQr.mockImplementation(async () => {
+        console.log('test-only-printer-result')
     })
+
+    await hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)
+
+    expect(hub.printWorkbenchLoginQr).toHaveBeenCalledTimes(1)
+    expect(hub.printWorkbenchLoginQr).toHaveBeenCalledWith()
+    expect(hub.revokeWorkbenchCredential).not.toHaveBeenCalled()
+    expect(hub.startHub).not.toHaveBeenCalled()
+    expect(console.log).toHaveBeenCalledTimes(1)
+    expect(console.log).toHaveBeenCalledWith('test-only-printer-result')
+    expect(console.error).not.toHaveBeenCalled()
+    expect(process.exit).not.toHaveBeenCalled()
 })
 
-test('login-qr prints the expiry, direct url and terminal qr for the web token only', async () => {
-    const cliToken = 'test-only-cli-token'
-    const webToken = 'test-only-web-token'
-    const issuedAt = Date.now()
-    const formatted = formatExpiry(issuedAt + 30 * 86_400_000)
-    await withLoginQr({
-        settings: { cliApiToken: cliToken, workbenchWebToken: webToken, workbenchCredentialIssuedAt: issuedAt },
-        ttl: '30',
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ logs }) => {
-        await hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)
-        const sentence = logs().find(line => line.startsWith('手机登录凭据'))
-        expect(sentence).toBe(`手机登录凭据 ${formatted} 到期（北京时间）`)
-        expect(sentence).toMatch(/^手机登录凭据 \d{2}-\d{2} \d{2}:\d{2} 到期（北京时间）$/)
-        expect(logs()).toContain(`http://127.0.0.1:9/?token=${webToken}`)
-        expect(logs().join('\n')).not.toContain(cliToken)
-        expect(logs().some(line => line.includes('\n'))).toBe(true)
-    })
+test.each(['revoke-credential', 'login-qr'])('%s rejects service options before dispatch', async command => {
+    await expect(hubCommand.run({
+        commandArgs: [command, '--port', '1']
+    } as CommandContext)).rejects.toThrow('process.exit:1')
+
+    expect(console.error).toHaveBeenCalledWith(
+        expect.any(String), `${command} does not accept service options`
+    )
+    expect(process.exit).toHaveBeenCalledWith(1)
+    expect(console.log).not.toHaveBeenCalled()
+    expect(hub.revokeWorkbenchCredential).not.toHaveBeenCalled()
+    expect(hub.printWorkbenchLoginQr).not.toHaveBeenCalled()
+    expect(hub.startHub).not.toHaveBeenCalled()
 })
 
-test('login-qr errors when HAPI_PUBLIC_URL is missing', async () => {
-    const token = 'test-only-login-token'
-    await withLoginQr({
-        settings: { cliApiToken: token, workbenchCredentialIssuedAt: Date.now() },
-        ttl: '30'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('HAPI_PUBLIC_URL is required')
-        expect(output()).not.toContain(token)
-    })
-})
+test.each(['revoke-credential', 'login-qr'])('%s reports implementation errors without starting the hub', async command => {
+    const action = command === 'revoke-credential'
+        ? hub.revokeWorkbenchCredential
+        : hub.printWorkbenchLoginQr
+    action.mockRejectedValue(new Error('test-only-command-failure'))
 
-test('login-qr still prints while the hub port is in use', async () => {
-    const server = createServer()
-    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
-    const address = server.address()
-    if (!address || typeof address === 'string') throw new Error('Missing test port')
-    const cliToken = 'test-only-cli-token'
-    const webToken = 'test-only-web-token'
-    try {
-        await withLoginQr({
-            settings: { cliApiToken: cliToken, workbenchWebToken: webToken, workbenchCredentialIssuedAt: Date.now(), listenPort: address.port },
-            ttl: '30',
-            publicUrl: 'http://127.0.0.1:9'
-        }, async ({ logs }) => {
-            await hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)
-            expect(logs()).toContain(`http://127.0.0.1:9/?token=${webToken}`)
-            expect(logs().join('\n')).not.toContain(cliToken)
-        })
-    } finally {
-        await new Promise<void>((resolve, reject) => { server.close(error => error ? reject(error) : resolve()) })
-    }
-})
+    await expect(hubCommand.run({
+        commandArgs: [command]
+    } as CommandContext)).rejects.toThrow('process.exit:1')
 
-test('login-qr does not accept service options', async () => {
-    const token = 'test-only-login-token'
-    await withLoginQr({
-        settings: { cliApiToken: token, workbenchCredentialIssuedAt: Date.now() },
-        ttl: '30',
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr', '--port', '1'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('login-qr does not accept service options')
-        expect(output()).not.toContain(token)
-        expect(output()).not.toContain('HAPI Hub starting')
-    })
-})
-
-test('failed secret rotation restores settings and leaves the CLI token and JWT secret unchanged', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-revoke-restore-'))
-    const prior = { home: process.env.HAPI_HOME, ttl: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS, token: process.env.CLI_API_TOKEN, port: process.env.HAPI_LISTEN_PORT, host: process.env.HAPI_LISTEN_HOST }
-    const originalSettings = JSON.stringify({ cliApiToken: 'test-only-cli-token', workbenchCredentialIssuedAt: 1000, listenPort: 0 })
-    const originalSecret = JSON.stringify({ secretBase64: Buffer.alloc(32, 3).toString('base64') })
-    await writeFile(join(directory, 'settings.json'), originalSettings)
-    await writeFile(join(directory, 'jwt-secret.json'), originalSecret)
-    process.env.HAPI_HOME = directory
-    process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS = '30'
-    delete process.env.CLI_API_TOKEN
-    delete process.env.HAPI_LISTEN_PORT
-    process.env.HAPI_LISTEN_HOST = '127.0.0.1'
-    let during = ''
-    try {
-        const { revokeWorkbenchCredential } = await import('hapi-hub/startHub')
-        await expect(revokeWorkbenchCredential({
-            rotateJwtSecret: async () => {
-                during = await readFile(join(directory, 'settings.json'), 'utf8')
-                throw new Error('jwt rotation failed')
-            }
-        })).rejects.toThrow('jwt rotation failed')
-        const midway = JSON.parse(during)
-        expect(midway.cliApiToken).toBe('test-only-cli-token')
-        expect(typeof midway.workbenchWebToken).toBe('string')
-        expect(midway.workbenchWebToken).not.toBe('test-only-cli-token')
-        expect(await readFile(join(directory, 'settings.json'), 'utf8')).toBe(originalSettings)
-        expect(await readFile(join(directory, 'jwt-secret.json'), 'utf8')).toBe(originalSecret)
-        expect(during).not.toBe(originalSettings)
-    } finally {
-        for (const [key, value] of Object.entries({ HAPI_HOME: prior.home, HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: prior.ttl, CLI_API_TOKEN: prior.token, HAPI_LISTEN_PORT: prior.port, HAPI_LISTEN_HOST: prior.host })) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-})
-
-test('unreadable settings refuse revocation and leave the JWT secret unchanged', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'hapi-revoke-settings-'))
-    const prior = { home: process.env.HAPI_HOME, ttl: process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS, token: process.env.CLI_API_TOKEN, port: process.env.HAPI_LISTEN_PORT, host: process.env.HAPI_LISTEN_HOST }
-    const originalSettings = '{'
-    const originalSecret = JSON.stringify({ secretBase64: Buffer.alloc(32, 4).toString('base64') })
-    await writeFile(join(directory, 'settings.json'), originalSettings)
-    await writeFile(join(directory, 'jwt-secret.json'), originalSecret)
-    process.env.HAPI_HOME = directory
-    process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS = '30'
-    delete process.env.CLI_API_TOKEN
-    delete process.env.HAPI_LISTEN_PORT
-    process.env.HAPI_LISTEN_HOST = '127.0.0.1'
-    try {
-        const { revokeWorkbenchCredential } = await import('hapi-hub/startHub')
-        await expect(revokeWorkbenchCredential()).rejects.toThrow('Cannot read')
-        expect(await readFile(join(directory, 'settings.json'), 'utf8')).toBe(originalSettings)
-        expect(await readFile(join(directory, 'jwt-secret.json'), 'utf8')).toBe(originalSecret)
-    } finally {
-        for (const [key, value] of Object.entries({ HAPI_HOME: prior.home, HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS: prior.ttl, CLI_API_TOKEN: prior.token, HAPI_LISTEN_PORT: prior.port, HAPI_LISTEN_HOST: prior.host })) {
-            if (value === undefined) delete process.env[key]
-            else process.env[key] = value
-        }
-        await rm(directory, { recursive: true, force: true })
-    }
-})
-
-test('login-qr is refused when the switch is off and neither token is printed', async () => {
-    const cliToken = 'test-only-cli-token'
-    const webToken = 'test-only-web-token'
-    await withLoginQr({
-        settings: { cliApiToken: cliToken, workbenchWebToken: webToken, workbenchCredentialIssuedAt: Date.now() },
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
-        expect(output()).not.toContain(cliToken)
-        expect(output()).not.toContain(webToken)
-    })
-})
-
-test('login-qr prints no token when the issuance time is missing', async () => {
-    const token = 'test-only-login-token'
-    await withLoginQr({
-        settings: { cliApiToken: token },
-        ttl: '30',
-        publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(hubCommand.run({ commandArgs: ['login-qr'] } as CommandContext)).rejects.toThrow('process.exit:1')
-        expect(output()).toContain('Invalid workbench credential issuance time')
-        expect(output()).not.toContain(token)
-    })
+    expect(action).toHaveBeenCalledTimes(1)
+    expect(action).toHaveBeenCalledWith()
+    expect(console.error).toHaveBeenCalledWith(expect.any(String), 'test-only-command-failure')
+    expect(process.exit).toHaveBeenCalledWith(1)
+    expect(console.log).not.toHaveBeenCalled()
+    expect(hub.startHub).not.toHaveBeenCalled()
 })
