@@ -1,6 +1,7 @@
 import { Server as Engine } from '@socket.io/bun-engine'
 import { Server, type DefaultEventsMap } from 'socket.io'
 import { jwtVerify } from 'jose'
+import type { WorkbenchCredential } from '../config/workbenchCredential'
 import { z } from 'zod'
 import type { Store } from '../store'
 import { getConfiguration } from '../configuration'
@@ -23,6 +24,12 @@ const jwtPayloadSchema = z.object({
 
 const DEFAULT_IDLE_TIMEOUT_MS = 15 * 60_000
 const DEFAULT_MAX_TERMINALS = 4
+
+export async function verifyTerminalJwt(token: string, secret: Uint8Array, credential: WorkbenchCredential | null) {
+    const verified = await jwtVerify(token, secret, { algorithms: ['HS256'] })
+    if (credential && !credential.accepts(verified.payload.cg)) throw new Error('credential_expired')
+    return verified
+}
 
 function resolveEnvNumber(name: string, fallback: number): number {
     const raw = process.env[name]
@@ -139,6 +146,10 @@ export function createSocketServer(deps: SocketServerDeps): {
         onMessagesConsumed: deps.onMessagesConsumed
     }))
 
+    configuration.workbenchCredential?.onRotate(() => {
+        terminalNs.disconnectSockets(true)
+    })
+
     terminalNs.use(async (socket, next) => {
         const auth = socket.handshake.auth as Record<string, unknown> | undefined
         const token = typeof auth?.token === 'string' ? auth.token : null
@@ -147,10 +158,19 @@ export function createSocketServer(deps: SocketServerDeps): {
         }
 
         try {
-            const verified = await jwtVerify(token, deps.jwtSecret, { algorithms: ['HS256'] })
+            const verified = await verifyTerminalJwt(token, deps.jwtSecret, configuration.workbenchCredential)
             const parsed = jwtPayloadSchema.safeParse(verified.payload)
             if (!parsed.success) {
                 return next(new Error('Invalid token payload'))
+            }
+            const credential = configuration.workbenchCredential
+            if (credential && !credential.accepts(verified.payload.cg)) return next(new Error('credential_expired'))
+            if (credential) {
+                socket.use((_packet, packetNext) => {
+                    if (credential.accepts(verified.payload.cg)) return packetNext()
+                    packetNext(new Error('credential_expired'))
+                    socket.disconnect(true)
+                })
             }
             socket.data.userId = parsed.data.uid
             socket.data.namespace = parsed.data.ns

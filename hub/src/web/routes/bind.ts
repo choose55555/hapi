@@ -25,10 +25,13 @@ export function createBindRoutes(jwtSecret: Uint8Array, store: Store): Hono<WebA
         }
 
         const configuration = getConfiguration()
+        const credential = configuration.workbenchCredential
+        const generation = credential?.generation
         const parsedToken = parseAccessToken(parsed.data.accessToken)
         if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
             return c.json({ error: 'Invalid access token' }, 401)
         }
+        if (credential?.expired) return c.json({ error: 'credential_expired' }, 401)
         const namespace = parsedToken.namespace
 
         if (!configuration.telegramEnabled || !configuration.telegramBotToken) {
@@ -49,10 +52,11 @@ export function createBindRoutes(jwtSecret: Uint8Array, store: Store): Hono<WebA
 
         const userId = await getOrCreateOwnerId()
 
-        const token = await new SignJWT({ uid: userId, ns: namespace })
+        if (credential && !credential.accepts(generation)) return c.json({ error: 'credential_expired' }, 401)
+        const token = await new SignJWT({ uid: userId, ns: namespace, ...(credential ? { cg: generation } : {}) })
             .setProtectedHeader({ alg: 'HS256' })
             .setIssuedAt()
-            .setExpirationTime('4h')
+            .setExpirationTime(credential ? credential.jwtExpiresAt() : '4h')
             .sign(jwtSecret)
 
         return c.json({

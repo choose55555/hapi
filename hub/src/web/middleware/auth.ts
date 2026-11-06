@@ -1,11 +1,13 @@
 import type { MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import { jwtVerify } from 'jose'
+import type { WorkbenchCredential } from '../../config/workbenchCredential'
 
 export type WebAppEnv = {
     Variables: {
         userId: number
         namespace: string
+        credentialGeneration?: number
     }
 }
 
@@ -14,7 +16,10 @@ const jwtPayloadSchema = z.object({
     ns: z.string()
 })
 
-export function createAuthMiddleware(jwtSecret: Uint8Array): MiddlewareHandler<WebAppEnv> {
+export function createAuthMiddleware(
+    jwtSecret: Uint8Array,
+    getCredential: () => WorkbenchCredential | null = () => null
+): MiddlewareHandler<WebAppEnv> {
     return async (c, next) => {
         const path = c.req.path
         if (path === '/api/auth' || path === '/api/bind') {
@@ -33,6 +38,11 @@ export function createAuthMiddleware(jwtSecret: Uint8Array): MiddlewareHandler<W
 
         try {
             const verified = await jwtVerify(token, jwtSecret, { algorithms: ['HS256'] })
+            const credential = getCredential()
+            if (credential && !credential.accepts(verified.payload.cg)) {
+                return c.json({ error: 'credential_expired' }, 401)
+            }
+            if (credential) c.set('credentialGeneration', credential.generation)
             const parsed = jwtPayloadSchema.safeParse(verified.payload)
             if (!parsed.success) {
                 return c.json({ error: 'Invalid token payload' }, 401)

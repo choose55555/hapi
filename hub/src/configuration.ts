@@ -31,6 +31,7 @@
  * - DB_PATH: SQLite database path (default: {HAPI_HOME}/hapi.db)
  */
 
+import { WorkbenchCredential, parseCredentialTtl } from './config/workbenchCredential'
 import { existsSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -83,6 +84,8 @@ class Configuration {
     public readonly serverChanBackgroundOnly: boolean
 
     /** CLI auth token (shared secret) */
+    public workbenchCredential: WorkbenchCredential | null = null
+
     public cliApiToken: string
 
     /** Source of CLI API token */
@@ -177,6 +180,10 @@ class Configuration {
 
     /** Create configuration asynchronously */
     static async create(): Promise<Configuration> {
+        const credentialTtl = parseCredentialTtl(process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS)
+        if (credentialTtl !== null && process.env.CLI_API_TOKEN !== undefined) {
+            throw new Error('CLI_API_TOKEN cannot be used with HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS')
+        }
         // 1. Determine data directory (env only - not persisted)
         const dataDir = process.env.HAPI_HOME
             ? process.env.HAPI_HOME.replace(/^~/, homedir())
@@ -215,6 +222,12 @@ class Configuration {
         const tokenResult = await getOrCreateCliApiToken(dataDir)
         config._setCliApiToken(tokenResult.token, tokenResult.source, tokenResult.isNew)
 
+        if (credentialTtl !== null) {
+            config.workbenchCredential = new WorkbenchCredential(
+                credentialTtl, config.settingsFile, token => { config.cliApiToken = token }
+            )
+            await config.workbenchCredential.initialize()
+        }
         return config
     }
 

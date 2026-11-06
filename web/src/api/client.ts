@@ -218,6 +218,14 @@ export class ApiError extends Error {
 }
 
 export class ApiClient {
+    async getWorkbenchCredential(): Promise<{ expiresAt: number }> {
+        return await this.request('/api/workbench/credential')
+    }
+
+    async renewWorkbenchCredential(): Promise<{ accessToken: string; expiresAt: number }> {
+        return await this.request('/api/workbench/credential/renew', { method: 'POST' })
+    }
+
     private token: string
     private readonly baseUrl: string | null
     private readonly getToken: (() => string | null) | null

@@ -14,6 +14,7 @@ import { createQwenProxyWebSocketHandler } from './qwenProxyHandler'
 import { decodeVoiceSystemPromptParam } from '../voiceSystemPromptParam'
 import type { SyncEngine } from '../sync/syncEngine'
 import { createAuthMiddleware, type WebAppEnv } from './middleware/auth'
+import { createWorkbenchCredentialRoutes } from './routes/workbenchCredential'
 import { createAuthRoutes } from './routes/auth'
 import { createBindRoutes } from './routes/bind'
 import { createEventsRoutes } from './routes/events'
@@ -255,6 +256,7 @@ function createWebApp(options: {
         status: 'ok',
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
+            ...(configuration.workbenchCredential ? { workbenchCredential: true } : {}),
             workGraph: true,
             titleSuggestion: readTitleProviderConfig() !== null
         }
@@ -286,7 +288,10 @@ function createWebApp(options: {
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
 
-    app.use('/api/*', createAuthMiddleware(options.jwtSecret))
+    app.use('/api/*', createAuthMiddleware(options.jwtSecret, () => configuration.workbenchCredential))
+    if (configuration.workbenchCredential) {
+        app.route('/api', createWorkbenchCredentialRoutes(configuration.workbenchCredential))
+    }
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
@@ -449,6 +454,11 @@ export async function startWebServer(options: {
     const configuration = getConfiguration()
     const socketHandler = options.socketEngine.handler()
 
+    const credentialSockets = new Set<ServerWebSocket<unknown>>()
+    configuration.workbenchCredential?.onRotate(() => {
+        for (const socket of credentialSockets) socket.close(1008, 'Credential changed')
+    })
+
     // Wrap socket.io websocket handler to also support Gemini/Qwen proxy connections
     const originalWsHandler = socketHandler.websocket
     const geminiProxyHandler = createGeminiProxyWebSocketHandler()
@@ -469,7 +479,15 @@ export async function startWebServer(options: {
             perMessageDeflate: true,
             open(ws: unknown) {
                 applyDefaultWsCompression(ws as ServerWebSocket<unknown>)
-                const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>
+                const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean; _credentialGeneration?: number }>
+                if (configuration.workbenchCredential && (wsAny.data?._geminiProxy || wsAny.data?._qwenProxy)
+                    && !configuration.workbenchCredential.accepts(wsAny.data._credentialGeneration)) {
+                    wsAny.close(1008, 'Credential changed')
+                    return
+                }
+                if (configuration.workbenchCredential && (wsAny.data?._geminiProxy || wsAny.data?._qwenProxy)) {
+                    credentialSockets.add(wsAny)
+                }
                 if (wsAny.data?._geminiProxy) {
                     geminiProxyHandler.open(wsAny)
                 } else if (wsAny.data?._qwenProxy) {
@@ -489,6 +507,7 @@ export async function startWebServer(options: {
                 }
             },
             close(ws: unknown, code: number, reason: string) {
+                credentialSockets.delete(ws as ServerWebSocket<unknown>)
                 const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>
                 if (wsAny.data?._geminiProxy) {
                     geminiProxyHandler.close(wsAny, code, reason)
@@ -501,6 +520,7 @@ export async function startWebServer(options: {
         },
         fetch: async (req: Request, server: { upgrade: (req: Request, opts?: unknown) => boolean }) => {
             const url = new URL(req.url)
+            let credentialGeneration: number | undefined
             if (url.pathname.startsWith('/socket.io/')) {
                 return socketHandler.fetch(req, server as never)
             }
@@ -513,7 +533,11 @@ export async function startWebServer(options: {
                     return new Response('Missing authorization token', { status: 401 })
                 }
                 try {
-                    await jwtVerify(token, options.jwtSecret, { algorithms: ['HS256'] })
+                    const verified = await jwtVerify(token, options.jwtSecret, { algorithms: ['HS256'] })
+                    if (configuration.workbenchCredential && !configuration.workbenchCredential.accepts(verified.payload.cg)) {
+                        return new Response('credential_expired', { status: 401 })
+                    }
+                    credentialGeneration = configuration.workbenchCredential?.generation
                 } catch {
                     return new Response('Invalid token', { status: 401 })
                 }
@@ -531,7 +555,7 @@ export async function startWebServer(options: {
                 const systemInstruction = decodeVoiceSystemPromptParam(url.searchParams.get('systemPrompt'))
                 const affectiveDialog = url.searchParams.get('affectiveDialog') === '1'
                 const upgraded = (server as unknown as { upgrade: (req: Request, opts: unknown) => boolean }).upgrade(req, {
-                    data: { _geminiProxy: true, apiKey, language, voiceName: voiceParam, systemInstruction, affectiveDialog }
+                    data: { _geminiProxy: true, _credentialGeneration: credentialGeneration, apiKey, language, voiceName: voiceParam, systemInstruction, affectiveDialog }
                 })
                 if (!upgraded) {
                     return new Response('WebSocket upgrade failed', { status: 500 })
@@ -550,7 +574,7 @@ export async function startWebServer(options: {
                     return new Response('DashScope API key not configured', { status: 400 })
                 }
                 const upgraded = (server as unknown as { upgrade: (req: Request, opts: unknown) => boolean }).upgrade(req, {
-                    data: { _qwenProxy: true, apiKey, model, language, voiceName: voiceParam, systemInstruction }
+                    data: { _qwenProxy: true, _credentialGeneration: credentialGeneration, apiKey, model, language, voiceName: voiceParam, systemInstruction }
                 })
                 if (!upgraded) {
                     return new Response('WebSocket upgrade failed', { status: 500 })

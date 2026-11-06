@@ -1,3 +1,6 @@
+import { acquireCredentialLease, workbenchDataDir } from './config/workbenchCredentialLease'
+import { parseCredentialTtl, startCredentialReminderChecks } from './config/workbenchCredential'
+import type { IosPushNotificationPayload } from './push-ios/iosPushService'
 import { createConfiguration, type ConfigSource } from './configuration'
 import { Store } from './store'
 import { SyncEngine, type SyncEvent } from './sync/syncEngine'
@@ -29,6 +32,8 @@ import { ServerChanChannel } from './serverchan/channel'
 import QRCode from 'qrcode'
 import type { Server as BunServer } from 'bun'
 import type { WebSocketData } from '@socket.io/bun-engine'
+
+export { revokeWorkbenchCredential } from './config/workbenchCredentialLease'
 
 /** Format config source for logging */
 function formatSource(source: ConfigSource | 'generated'): string {
@@ -108,6 +113,29 @@ export interface StartHubOptions {
 }
 
 export async function startHub(options: StartHubOptions = {}): Promise<HubInstance> {
+    if (parseCredentialTtl(process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS) === null) {
+        return startHubInternal(options)
+    }
+    if (process.env.CLI_API_TOKEN !== undefined) {
+        throw new Error('CLI_API_TOKEN cannot be used with HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS')
+    }
+    const release = await acquireCredentialLease(workbenchDataDir())
+    try {
+        const hub = await startHubInternal(options)
+        let stopped = false
+        return { stop: async () => {
+            if (stopped) return
+            await hub.stop()
+            await release()
+            stopped = true
+        } }
+    } catch (error) {
+        await release()
+        throw error
+    }
+}
+
+async function startHubInternal(options: StartHubOptions): Promise<HubInstance> {
     console.log('HAPI Hub starting...')
 
     let syncEngine: SyncEngine | null = null
@@ -130,7 +158,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         : baseCorsOrigins
 
     // Display CLI API token information
-    if (config.cliApiTokenIsNew) {
+    if (config.cliApiTokenIsNew && !config.workbenchCredential) {
         console.log('')
         console.log('='.repeat(70))
         console.log('  NEW CLI_API_TOKEN GENERATED')
@@ -213,14 +241,27 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     syncEngine.setHubOwnerUserId(await getOrCreateOwnerId())
 
     const androidPushConfig = resolveAndroidPushConfig(config)
+    const credentialSenders: Array<(namespace: string, payload: IosPushNotificationPayload) => Promise<unknown>> = []
     const notificationChannels: NotificationChannel[] = []
     if (androidPushConfig.mode === 'fcm') {
         const { fcm } = androidPushConfig
         const sender = new FcmService(fcm.projectId, fcm.serviceAccount, store)
+        credentialSenders.push((namespace, payload) => sender.sendToNamespace(namespace, {
+            title: payload.title, body: payload.body, data: {
+                type: payload.type, sessionId: payload.sessionId, sessionName: '', url: payload.url ?? '/settings',
+                title: payload.title, body: payload.body, contractVersion: payload.contractVersion
+            }
+        }))
         notificationChannels.push(new FcmNotificationChannel(sender, sseManager, visibilityTracker, store))
         console.log(`[Hub] Android push: fcm (project: ${fcm.projectId})`)
     } else if (androidPushConfig.mode === 'relay') {
         const sender = new AndroidRelayService(new RelayClient(androidPushConfig.relayUrl, 'android'), store)
+        credentialSenders.push((namespace, payload) => sender.sendToNamespace(namespace, {
+            title: payload.title, body: payload.body, data: {
+                type: payload.type, sessionId: payload.sessionId, sessionName: '', url: payload.url ?? '/settings',
+                title: payload.title, body: payload.body, contractVersion: payload.contractVersion
+            }
+        }))
         notificationChannels.push(new FcmNotificationChannel(sender, sseManager, visibilityTracker, store))
         console.log(`[Hub] Android push: relay (url: ${androidPushConfig.relayUrl})`)
     } else {
@@ -233,10 +274,12 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     const iosPushConfig = resolveIosPushConfig(config)
     if (iosPushConfig.mode === 'relay') {
         const iosPushService = new IosPushService(new RelayClient(iosPushConfig.relayUrl, 'ios'), store)
+        credentialSenders.push((namespace, payload) => iosPushService.sendToNamespace(namespace, payload))
         notificationChannels.push(new IosPushNotificationChannel(iosPushService, store))
         console.log(`[Hub] iOS push: relay (${iosPushConfig.source}, url: ${iosPushConfig.relayUrl})`)
     } else if (iosPushConfig.mode === 'apns') {
         const iosPushService = new IosPushService(new ApnsClient(iosPushConfig), store)
+        credentialSenders.push((namespace, payload) => iosPushService.sendToNamespace(namespace, payload))
         notificationChannels.push(new IosPushNotificationChannel(iosPushService, store))
         console.log(`[Hub] iOS push: apns (${iosPushConfig.env}, topic: ${iosPushConfig.bundleId})`)
     } else {
@@ -323,7 +366,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         }
     }
 
-    if (tunnelUrl && tunnelManager) {
+    if (tunnelUrl && tunnelManager && !config.workbenchCredential) {
         const manager = tunnelManager
         const announceTunnelAccess = async () => {
             const tlsReady = await waitForTunnelTlsReady(tunnelUrl, manager)
@@ -389,8 +432,37 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     console.log('')
     console.log('HAPI Hub is ready!')
 
+    let stopCredentialReminders = () => {}
+    const stopCredentialExpiry = config.workbenchCredential?.watchExpiry()
+    if (config.workbenchCredential) {
+        const credential = config.workbenchCredential
+        stopCredentialReminders = await startCredentialReminderChecks(credential, async expiresAt => {
+            const formatted = new Intl.DateTimeFormat('sv-SE', {
+                timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+            }).format(expiresAt)
+            const payload: IosPushNotificationPayload = {
+                type: 'credential-expiring', sessionId: '', url: '/settings',
+                title: '手机登录凭据快到期',
+                body: `将于 ${formatted} 到期（北京时间）。点开后按“换新凭据”。`,
+                contractVersion: '1', severity: 'warning'
+            }
+            for (const namespace of store.push.getCredentialReminderNamespaces()) {
+                await Promise.all([
+                    pushService.sendToNamespace(namespace, {
+                        title: payload.title, body: payload.body, tag: 'credential-expiring',
+                        data: { type: payload.type, sessionId: '', url: '/settings' }
+                    }),
+                    ...credentialSenders.map(send => send(namespace, payload))
+                ])
+            }
+        })
+    }
+
     return {
         stop: async () => {
+            stopCredentialReminders()
+            stopCredentialExpiry?.()
             await tunnelManager?.stop()
             await happyBot?.stop()
             notificationHub?.stop()

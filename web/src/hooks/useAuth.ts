@@ -43,6 +43,9 @@ function isFetchNetworkError(error: unknown): boolean {
 }
 
 function authErrorMessage(error: unknown, fallback: string): string {
+    if (error instanceof ApiError && error.code === 'credential_expired') {
+        return '手机登录凭据已过期，请回到电脑上开一个可遥控窗口，扫屏幕上的二维码重新登录'
+    }
     // Match browser fetch failures only; programming and HTTP/auth errors keep their text.
     if (isFetchNetworkError(error)) {
         return '连不上电脑，请打开手机上的 Tailscale 再试'
@@ -138,7 +141,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                     const msg = currentSource.type === 'telegram'
                         ? 'Session expired. Reopen the Mini App from Telegram.'
                         : 'Session expired. Please login again.'
-                    setError(msg)
+                    setError(error instanceof ApiError && error.code === 'credential_expired' ? authErrorMessage(error, msg) : msg)
                 }
                 return null
             }

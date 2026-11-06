@@ -29,6 +29,7 @@ import { getAppGlobalSseSubscription, getAppSessionSseSubscription } from '@/lib
 import { canUseAppBadging, useAppBadge } from '@/hooks/useAppBadge'
 import { useAppBadgePreference } from '@/hooks/useAppBadgePreference'
 import { reconcileQueuedStateAfterConnect } from '@/lib/queued-state-reconciliation'
+import { WorkbenchCredentialNotice, formatCredentialDate } from '@/components/WorkbenchCredentialNotice'
 import { LoginPrompt } from '@/components/LoginPrompt'
 import { InstallPrompt } from '@/components/InstallPrompt'
 import { OfflineBanner } from '@/components/OfflineBanner'
@@ -73,6 +74,7 @@ function AppInner() {
     const { serverUrl, baseUrl, setServerUrl, clearServerUrl } = useServerUrl()
     const { authSource, isLoading: isAuthSourceLoading, setAccessToken } = useAuthSource(baseUrl)
     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
+    const [credentialAvailable, setCredentialAvailable] = useState(false)
     const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
     const goBack = useAppGoBack()
     const pathname = useLocation({ select: (location) => location.pathname })
@@ -82,6 +84,7 @@ function AppInner() {
 
     useEffect(() => {
         let cancelled = false
+        setCredentialAvailable(false)
         setTitleSuggestionAvailable(false)
         if (!api) return () => { cancelled = true }
 
@@ -89,6 +92,7 @@ function AppInner() {
             .then((health) => {
                 if (!cancelled) {
                     setTitleSuggestionAvailable(health.capabilities?.titleSuggestion === true)
+                    setCredentialAvailable((health.capabilities as { workbenchCredential?: boolean } | undefined)?.workbenchCredential === true)
                 }
             })
             .catch(() => {
@@ -536,6 +540,12 @@ function AppInner() {
                 />
                 <RunnerVersionSkewBanner />
                 <div className="h-full min-h-0 flex flex-col">
+                    {credentialAvailable && (
+                        <WorkbenchCredentialNotice api={api} pathname={pathname} onRenew={(accessToken, expiresAt) => {
+                            setAccessToken(accessToken)
+                            addToast({ title: `已换新，下次到期 ${formatCredentialDate(expiresAt, true)}`, body: '' })
+                        }} />
+                    )}
                     <Outlet />
                 </div>
                 <ToastContainer />

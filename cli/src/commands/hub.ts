@@ -25,6 +25,13 @@ export const hubCommand: CommandDefinition = {
     requiresRuntimeAssets: true,
     run: async (context: CommandContext) => {
         try {
+            if (context.commandArgs[0] === 'revoke-credential') {
+                if (context.commandArgs.length !== 1) throw new Error('revoke-credential does not accept service options')
+                const { revokeWorkbenchCredential } = await import('hapi-hub/startHub')
+                await revokeWorkbenchCredential()
+                console.log('Mobile login credential revoked. Start the hub to pair again.')
+                return
+            }
             const { host, port } = parseHubArgs(context.commandArgs)
 
             if (host) {

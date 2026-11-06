@@ -9,6 +9,8 @@ export interface Settings {
     machineIdConfirmedByServer?: boolean
     runnerAutoStartWhenRunningHappy?: boolean
     cliApiToken?: string
+    workbenchCredentialIssuedAt?: number
+    workbenchCredentialRemindedFor?: number
     vapidKeys?: {
         publicKey: string
         privateKey: string

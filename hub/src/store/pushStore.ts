@@ -10,6 +10,12 @@ export class PushStore {
         this.db = db
     }
 
+    getCredentialReminderNamespaces(): string[] {
+        return (this.db.query(
+            'SELECT DISTINCT namespace FROM push_subscriptions UNION SELECT DISTINCT namespace FROM fcm_devices'
+        ).all() as Array<{ namespace: string }>).map(row => row.namespace)
+    }
+
     addPushSubscription(namespace: string, subscription: { endpoint: string; p256dh: string; auth: string }): void {
         addPushSubscription(this.db, namespace, subscription)
     }
