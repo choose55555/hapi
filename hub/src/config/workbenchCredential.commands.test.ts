@@ -99,10 +99,10 @@ test('revoke is refused when the ttl switch is off and neither credential file c
 })
 
 function formatExpiry(expiresAt: number): string {
-    return new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
-    }).format(expiresAt)
+    // Independent of the implementation: Beijing time is UTC+8 with no DST.
+    const d = new Date(expiresAt + 8 * 3_600_000)
+    const two = (n: number) => String(n).padStart(2, '0')
+    return `${two(d.getUTCMonth() + 1)}-${two(d.getUTCDate())} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
 }
 
 async function withLoginQr(

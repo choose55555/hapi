@@ -3,11 +3,12 @@ import { getSettingsFile, readSettingsOrThrow } from './settings'
 import { parseCredentialTtl } from './workbenchCredential'
 import { workbenchDataDir } from './workbenchCredentialLease'
 
-function formatExpiry(expiresAt: number): string {
-    return new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
-    }).format(expiresAt)
+export function formatExpiry(expiresAt: number): string {
+    // Beijing time is UTC+8 with no DST. Built by hand: locale layouts differ between
+    // runtimes (Bun printed "06/12 19:19" for sv-SE), so never rely on one.
+    const d = new Date(expiresAt + 8 * 3_600_000)
+    const two = (n: number) => String(n).padStart(2, '0')
+    return `${two(d.getUTCMonth() + 1)}-${two(d.getUTCDate())} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
 }
 
 function directAccessUrl(publicUrl: string, token: string): string {

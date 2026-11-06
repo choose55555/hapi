@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 
 export function formatCredentialDate(time: number, dayOnly = false): string {
-    return new Intl.DateTimeFormat('sv-SE', {
-        timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
-        ...(dayOnly ? {} : { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' as const })
-    }).format(time)
+    // Beijing time is UTC+8 with no DST; build MM-dd[ HH:mm] by hand so the layout
+    // does not depend on the phone browser's locale data.
+    const d = new Date(time + 8 * 3_600_000)
+    const two = (n: number) => String(n).padStart(2, '0')
+    const day = `${two(d.getUTCMonth() + 1)}-${two(d.getUTCDate())}`
+    return dayOnly ? day : `${day} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}`
 }
 
 export function WorkbenchCredentialNotice(props: {

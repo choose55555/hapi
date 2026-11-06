@@ -1,4 +1,5 @@
 import { acquireCredentialLease, workbenchDataDir } from './config/workbenchCredentialLease'
+import { formatExpiry } from './config/workbenchLoginQr'
 import { countDelivered, deliverReminderToNamespaces, parseCredentialTtl, startCredentialReminderChecks } from './config/workbenchCredential'
 import type { IosPushNotificationPayload } from './push-ios/iosPushService'
 import { createConfiguration, type ConfigSource } from './configuration'
@@ -438,10 +439,7 @@ async function startHubInternal(options: StartHubOptions): Promise<HubInstance> 
     if (config.workbenchCredential) {
         const credential = config.workbenchCredential
         stopCredentialReminders = await startCredentialReminderChecks(credential, async expiresAt => {
-            const formatted = new Intl.DateTimeFormat('sv-SE', {
-                timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
-            }).format(expiresAt)
+            const formatted = formatExpiry(expiresAt)
             const payload: IosPushNotificationPayload = {
                 type: 'credential-expiring', sessionId: '', url: '/settings',
                 title: '手机登录凭据快到期',
