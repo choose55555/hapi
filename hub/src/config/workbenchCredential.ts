@@ -214,7 +214,7 @@ export class WorkbenchCredential {
         }
     }
 
-    checkReminder(send: (expiresAt: number) => Promise<void>): Promise<void> {
+    checkReminder(send: (expiresAt: number) => Promise<boolean>): Promise<void> {
         return this.serialize(async () => {
             if (!credentialReminderDue(this.ttlMs, this.issuedAt, this.remindedFor, this.now())) return
             const delivered = await send(this.expiresAt)

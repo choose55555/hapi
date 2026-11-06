@@ -101,7 +101,11 @@ export async function revokeWorkbenchCredential(deps: {
         } catch (error) {
             if (!settingsWritten) throw error
             try {
-                if (originalSettings === null) await unlink(settingsFile).catch(() => {})
+                if (originalSettings === null) {
+                    await unlink(settingsFile).catch((unlinkError: NodeJS.ErrnoException) => {
+                        if (unlinkError?.code !== 'ENOENT') throw unlinkError
+                    })
+                }
                 else await writeFile(settingsFile, originalSettings)
                 forgetSettingsReadCache()
             } catch (restoreError) {

@@ -238,7 +238,7 @@ describe('workbench credential persistence and actual HTTP/socket JWT checks', (
         expect((await readSettingsOrThrow(f.settingsFile)).workbenchCredentialRemindedFor).toBeUndefined()
         let sentAfterExpiry = false
         f.setNow(f.credential.expiresAt)
-        await f.credential.checkReminder(async () => { sentAfterExpiry = true })
+        await f.credential.checkReminder(async () => { sentAfterExpiry = true; return true })
         expect(sentAfterExpiry).toBe(false)
     })
 
