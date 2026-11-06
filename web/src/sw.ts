@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { precacheAndRoute, cleanupOutdatedCaches, createHandlerBoundToURL } from 'workbox-precaching'
+import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
 import { registerRoute } from 'workbox-routing'
 import { CacheFirst, NetworkFirst } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
@@ -61,15 +61,10 @@ registerRoute(
     })
 )
 
-// A refreshed tab must receive the newly installed HTML, including deep links
-// and installations under VITE_BASE_URL. Never turn an API request into HTML.
-registerRoute(
-    ({ request, url }) => request.mode === 'navigate'
-        && url.origin === scopeUrl.origin
-        && url.pathname.startsWith(scopeUrl.pathname)
-        && !/^(?:api|cli|socket\.io|health)(?:\/|$)/.test(url.pathname.slice(scopeUrl.pathname.length)),
-    createHandlerBoundToURL('index.html')
-)
+// No navigation fallback route: deep-link navigations go to the hub, which always
+// serves the current index.html. createHandlerBoundToURL('index.html') threw at
+// worker evaluation when index.html was not in the manifest (the dev worker), and a
+// catch-all also risked answering server paths such as /health with HTML.
 
 registerRoute(
     ({ url }) => url.pathname === '/api/sessions',

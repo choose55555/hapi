@@ -118,13 +118,13 @@ describe('v7 service worker', () => {
         for (const url of ['https://other.test/app/assets/a.js', 'https://hapi.test/other/assets/a.js', 'https://hapi.test/app/api/sessions']) {
             expect(assetMatch({ url: new URL(url) })).toBe(false)
         }
-        const navigation = callbacks.map(([match]) => match).find(match =>
-            match({ url: new URL('https://hapi.test/app/sessions'), request: { mode: 'navigate' } }))
-        expect(navigation).toBeDefined()
-        for (const path of ['api/sessions', 'api', 'cli/x', 'socket.io/', 'health']) {
-            expect(navigation({ url: new URL('https://hapi.test/app/' + path), request: { mode: 'navigate' } })).toBe(false)
+        // No catch-all navigation route: server paths and deep links reach the hub.
+        for (const path of ['sessions', 'health', 'api/sessions', 'cli/x']) {
+            const hits = callbacks.map(([match]) => match).filter(match => {
+                try { return match({ url: new URL('https://hapi.test/app/' + path), request: { mode: 'navigate' } }) === true }
+                catch { return false }
+            })
+            expect(hits).toEqual([])
         }
-        expect(navigation({ url: new URL('https://hapi.test/app/healthy-route'), request: { mode: 'navigate' } })).toBe(true)
-        expect(navigation({ url: new URL('https://hapi.test/app/sessions'), request: { mode: 'cors' } })).toBe(false)
     })
 })
