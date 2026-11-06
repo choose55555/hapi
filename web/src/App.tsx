@@ -543,7 +543,7 @@ function AppInner() {
                     {credentialAvailable && (
                         <WorkbenchCredentialNotice api={api} pathname={pathname} onRenew={(accessToken, expiresAt) => {
                             setAccessToken(accessToken)
-                            addToast({ title: `已换新，下次到期 ${formatCredentialDate(expiresAt, true)}`, body: '' })
+                            addToast({ title: `已换新，下次到期 ${formatCredentialDate(expiresAt, true)}`, body: '', sessionId: '', url: '' })
                         }} />
                     )}
                     <Outlet />
