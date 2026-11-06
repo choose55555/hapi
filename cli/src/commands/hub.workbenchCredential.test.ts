@@ -1,4 +1,6 @@
-import { expect, test, spyOn } from 'bun:test'
+import { expect, test, vi } from 'vitest'
+
+const spyOn = vi.spyOn
 import { mkdtemp, readFile, readdir, writeFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
