@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Hono, type MiddlewareHandler } from 'hono'
 import { compress } from 'hono/compress'
 import { cors } from 'hono/cors'
 import { requestLogger as logger } from './requestLogger'
@@ -222,6 +222,28 @@ function serveEmbeddedAsset(asset: EmbeddedWebAsset): Response {
     })
 }
 
+// Registered after API/CLI routes and the relay-only branch, before both
+// embedded and filesystem static serving. Exported for isolated HTTP tests.
+export const staticCompression: MiddlewareHandler = async (c, next) => {
+    await next()
+    if (c.req.path.startsWith('/api') || c.req.path.startsWith('/cli')
+        || c.req.method !== 'GET' || c.res.status !== 200 || !c.res.body
+        || c.res.headers.has('Content-Encoding') || c.res.headers.has('Content-Range')) return
+
+    const type = (c.res.headers.get('Content-Type') ?? '').split(';')[0].trim().toLowerCase()
+    if (!/^(?:text\/(?:html|css|javascript)|application\/(?:javascript|json|manifest\+json))$/.test(type)) return
+
+    // Both representations vary, including when gzip is explicitly refused.
+    const vary = c.res.headers.get('Vary')
+    if (vary !== '*' && !vary?.split(',').some(value => value.trim().toLowerCase() === 'accept-encoding')) {
+        c.header('Vary', vary ? vary + ', Accept-Encoding' : 'Accept-Encoding')
+    }
+    if (!acceptsGzip(c.req.header('Accept-Encoding'))) return
+    // Reuse Hono's streaming compressor; the existing q-aware parser above
+    // prevents its substring negotiation from accepting gzip;q=0.
+    await compress({ encoding: 'gzip' })(c, async () => {})
+}
+
 function createWebApp(options: {
     getSyncEngine: () => SyncEngine | null
     getSseManager: () => SSEManager | null
@@ -351,6 +373,8 @@ from GitHub Pages instead of through the relay tunnel.
         })
         return app
     }
+
+    app.use('*', staticCompression)
 
     if (options.embeddedAssetMap) {
         const embeddedAssetMap = options.embeddedAssetMap

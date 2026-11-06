@@ -105,7 +105,7 @@ export default defineConfig({
         spaFallback(),
         copyKaTeXFonts(),
         VitePWA({
-            // User-controlled reload avoids mid-session surprise reloads (autoUpdate reloads all tabs).
+            // Keep the banner/manual reload callbacks. The worker itself takes over updates.
             registerType: 'prompt',
             includeAssets: ['favicon.ico', 'apple-touch-icon-180x180.png', 'mask-icon.svg'],
             strategies: 'injectManifest',
@@ -219,10 +219,12 @@ export default defineConfig({
                 }
             },
             injectManifest: {
-                globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-                // The SPA entry contains the complete multi-agent control surface.
-                // Keep it available offline after adding Pi history import instead
-                // of silently dropping the entry chunk from the PWA precache.
+                globPatterns: ['index.html', 'assets/index-*.js', 'assets/index-*.css', '*.ico', '*.png', 'icon.svg', 'mask-icon.svg', 'manifest.webmanifest'],
+                // Only the shell is installed eagerly. Everything else (chunks the entry
+                // imports, lazy chunks, KaTeX fonts) is fetched by the page itself and
+                // runtime-cached by sw.ts, so a slow link no longer downloads every
+                // chunk in the background on first visit. Keep large entry chunks
+                // eligible; do not silently drop the shell.
                 maximumFileSizeToCacheInBytes: 3 * 1024 * 1024
             },
             devOptions: {

@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { precacheAndRoute } from 'workbox-precaching'
+import { precacheAndRoute, cleanupOutdatedCaches, createHandlerBoundToURL } from 'workbox-precaching'
 import { registerRoute } from 'workbox-routing'
 import { CacheFirst, NetworkFirst } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
@@ -30,7 +30,46 @@ type PushPayload = {
     }
 }
 
+// Capture this when the worker starts, before registration.active becomes this worker.
+// Initial installation needs no reload. Updates must replace the already-loaded
+// old JavaScript as well as its controller (claim alone does not do that).
+// Re-evaluating after an install/activate process restart still sees an active
+// registration, so a restart cannot silently lose the update reload flag.
+const replacingWorker = self.registration.active !== null
+self.addEventListener('install', (event) => {
+    event.waitUntil(self.skipWaiting())
+})
+
 precacheAndRoute(self.__WB_MANIFEST)
+// Workbox also removes obsolete entries in its current precache on activation.
+// This removes incompatible precaches left by older Workbox versions only;
+// share transfers and API caches are intentionally untouched.
+cleanupOutdatedCaches()
+
+const scopeUrl = new URL(self.registration.scope)
+const assetsPath = new URL('assets/', scopeUrl).pathname
+registerRoute(
+    ({ url }) => url.origin === scopeUrl.origin
+        && url.pathname.startsWith(assetsPath)
+        && /\.(?:js|css|woff2?|ttf|otf|png|ico|svg)$/i.test(url.pathname),
+    new CacheFirst({
+        cacheName: 'hapi-static-v1',
+        plugins: [
+            cacheOkResponsesOnly,
+            new ExpirationPlugin({ maxEntries: 150, maxAgeSeconds: 60 * 60 * 24 * 30 })
+        ]
+    })
+)
+
+// A refreshed tab must receive the newly installed HTML, including deep links
+// and installations under VITE_BASE_URL. Never turn an API request into HTML.
+registerRoute(
+    ({ request, url }) => request.mode === 'navigate'
+        && url.origin === scopeUrl.origin
+        && url.pathname.startsWith(scopeUrl.pathname)
+        && !/^(?:api|cli|socket\.io|health)(?:\/|$)/.test(url.pathname.slice(scopeUrl.pathname.length)),
+    createHandlerBoundToURL('index.html')
+)
 
 registerRoute(
     ({ url }) => url.pathname === '/api/sessions',
@@ -110,7 +149,22 @@ self.addEventListener('message', (event) => {
 })
 
 self.addEventListener('activate', (event) => {
-    event.waitUntil(self.clients.claim())
+    event.waitUntil((async () => {
+        await self.clients.claim()
+        if (!replacingWorker) return
+        const windows = await self.clients.matchAll({ type: 'window' })
+        await Promise.all(windows.map(async (client) => {
+            const url = new URL(client.url)
+            if (url.origin !== scopeUrl.origin || !url.pathname.startsWith(scopeUrl.pathname)) return
+            try {
+                // Retain deep links, query state and fragments; only reload once
+                // per activation. A closed tab must not fail the whole update.
+                await client.navigate(client.url)
+            } catch (error) {
+                console.warn('Updated page reload failed', error)
+            }
+        }))
+    })())
 })
 
 self.addEventListener('push', (event) => {
