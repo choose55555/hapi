@@ -49,11 +49,45 @@ type PendingRequest = {
  */
 export class LocalPermissionBridge {
     private active = false
+    private nativeProcessObserved = false
+    private nativeInputReady = false
+    private untrackedNativeDialog = false
     private nativeSessionId: string | null = null
     private readonly calls = new Map<string, ObservedCall>()
     private readonly pending = new Map<string, PendingRequest>()
+    private readonly idleWaiters = new Set<() => void>()
+
+    private inputStateListener: (() => void) | null = null
 
     constructor(private readonly client: PermissionHandlerClient) {}
+
+    setInputStateListener(listener: (() => void) | null): void { this.inputStateListener = listener }
+
+    isNativeProcessObserved = (): boolean => this.active && this.nativeProcessObserved
+
+    isNativeInputReady = (): boolean => this.active && this.nativeInputReady
+
+    hasPendingRequests = (): boolean =>
+        this.untrackedNativeDialog || this.calls.size > 0 || this.pending.size > 0
+
+    waitForIdle = (signal?: AbortSignal): Promise<void> => {
+        if (!this.hasPendingRequests() || signal?.aborted) {
+            return Promise.resolve()
+        }
+        return new Promise<void>(resolve => {
+            const onDone = () => {
+                this.idleWaiters.delete(onDone)
+                if (signal) {
+                    signal.removeEventListener('abort', onDone)
+                }
+                resolve()
+            }
+            this.idleWaiters.add(onDone)
+            if (signal) {
+                signal.addEventListener('abort', onDone, { once: true })
+            }
+        })
+    }
 
     start(nativeSessionId: string | null): void {
         this.stop()
@@ -69,8 +103,12 @@ export class LocalPermissionBridge {
 
     stop = (): void => {
         this.active = false
+        this.nativeProcessObserved = false
+        this.nativeInputReady = false
+        this.untrackedNativeDialog = false
         this.cancelAll('Local permission bridge closed')
         this.nativeSessionId = null
+        this.notifyIdleIfClear()
     }
 
     onHook(data: SessionHookData): void {
@@ -79,16 +117,24 @@ export class LocalPermissionBridge {
         if (!this.active || data.agent_id !== undefined) return
         if (data.hook_event_name === 'SessionStart' && typeof data.session_id === 'string') {
             if (this.nativeSessionId !== data.session_id) this.cancelAll('Claude session changed')
+            this.untrackedNativeDialog = false
             this.nativeSessionId = data.session_id
+            this.nativeProcessObserved = true
+            this.nativeInputReady = false
         }
         if (!this.nativeSessionId || data.session_id !== this.nativeSessionId) return
 
         if (data.hook_event_name === 'SessionEnd') {
             // /clear and /resume end a native session without exiting the
             // local process. Keep this activation ready for its next start.
+            this.nativeInputReady = false
+            this.untrackedNativeDialog = false
             this.cancelAll('Claude session ended')
             this.nativeSessionId = null
         } else if (data.hook_event_name === 'UserPromptSubmit') {
+            this.nativeProcessObserved = true
+            this.nativeInputReady = true
+            this.untrackedNativeDialog = false
             this.cancelAll('A new local prompt superseded the request')
         } else if (data.hook_event_name === 'PreToolUse') {
             if (typeof data.tool_use_id !== 'string' || typeof data.tool_name !== 'string' || !isObject(data.tool_input)) return
@@ -101,7 +147,10 @@ export class LocalPermissionBridge {
             })
             if (this.calls.size > MAX_OBSERVED_CALLS) {
                 const oldest = this.calls.keys().next().value
-                if (oldest) this.finishTool(oldest, 'canceled', 'Remote permission tracking expired')
+                if (oldest) {
+                    this.untrackedNativeDialog = true
+                    this.finishTool(oldest, 'canceled', 'Remote permission tracking expired')
+                }
             }
         } else if (data.hook_event_name === 'PostToolUse' || data.hook_event_name === 'PostToolUseFailure') {
             if (typeof data.tool_use_id === 'string') {
@@ -131,11 +180,16 @@ export class LocalPermissionBridge {
         if (!this.active || signal.aborted || data.agent_id !== undefined || data.session_id !== this.nativeSessionId) {
             return Promise.resolve(null)
         }
+        // An uncorrelated/native-only dialog must also block console input.
         // Plan-mode transitions need their own UX/permission-mode semantics.
-        if (data.tool_name === 'ExitPlanMode') return Promise.resolve(null)
+        if (data.tool_name === 'ExitPlanMode') {
+            this.untrackedNativeDialog = true
+            return Promise.resolve(null)
+        }
         if (data.tool_name === 'AskUserQuestion') {
             const questions = questionsSchema.safeParse(data.tool_input.questions)
             if (!questions.success || new Set(questions.data.map(q => q.question)).size !== questions.data.length) {
+                this.untrackedNativeDialog = true
                 return Promise.resolve(null)
             }
         }
@@ -144,7 +198,10 @@ export class LocalPermissionBridge {
         // tool name". Ambiguous or unobserved requests remain native-only.
         const matches = [...this.calls].filter(([, call]) => call.tool === data.tool_name
             && call.promptId === data.prompt_id && isDeepStrictEqual(call.input, data.tool_input))
-        if (matches.length !== 1 || matches[0][1].claimed) return Promise.resolve(null)
+        if (matches.length !== 1 || matches[0][1].claimed) {
+            this.untrackedNativeDialog = true
+            return Promise.resolve(null)
+        }
         const [toolCallId, call] = matches[0]
         call.claimed = true
         const id = REQUEST_PREFIX + randomUUID()
@@ -203,6 +260,7 @@ export class LocalPermissionBridge {
         // answer as accepted: the native dialog may already have won.
         this.removeRequest(pending.id)
         pending.resolve(decision)
+        this.notifyIdleIfClear()
     }
 
     private removeRequest(id: string): void {
@@ -218,6 +276,7 @@ export class LocalPermissionBridge {
         for (const [id, pending] of this.pending) {
             if (pending.entry.toolCallId === toolCallId) this.finish(id, status, reason, result)
         }
+        this.notifyIdleIfClear()
     }
 
     private finish(id: string, status: AgentStateCompletedRequest['status'], reason?: string, result?: unknown): void {
@@ -248,10 +307,22 @@ export class LocalPermissionBridge {
                 }
             }
         })
+        this.notifyIdleIfClear()
     }
 
     private cancelAll(reason: string): void {
         for (const id of this.pending.keys()) this.finish(id, 'canceled', reason)
         this.calls.clear()
+        this.notifyIdleIfClear()
+    }
+
+    private notifyIdleIfClear(): void {
+        this.inputStateListener?.()
+        if (this.hasPendingRequests()) {
+            return
+        }
+        for (const waiter of [...this.idleWaiters]) {
+            waiter()
+        }
     }
 }

@@ -148,14 +148,15 @@ async function withLoginQr(
     }
 }
 
-test('login-qr is unavailable when the credential ttl switch is off', async () => {
+test('login-qr prints the CLI token when the credential ttl switch is off', async () => {
     const token = 'test-only-login-token'
     await withLoginQr({
         settings: { cliApiToken: token, workbenchCredentialIssuedAt: Date.now() },
         publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(printWorkbenchLoginQr()).rejects.toThrow('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
-        expect(output()).not.toContain(token)
+    }, async ({ logs, output }) => {
+        await printWorkbenchLoginQr()
+        expect(logs()).toContain(`http://127.0.0.1:9/?token=${token}`)
+        expect(logs().some(line => line.startsWith('手机登录凭据'))).toBe(false)
         expect(output()).not.toContain('HAPI Hub starting')
     })
 })
@@ -286,16 +287,17 @@ test('unreadable settings refuse revocation and leave the JWT secret unchanged',
     }
 })
 
-test('login-qr is refused when the switch is off and neither token is printed', async () => {
+test('login-qr with the switch off prints the CLI token and not the web token', async () => {
     const cliToken = 'test-only-cli-token'
     const webToken = 'test-only-web-token'
     await withLoginQr({
         settings: { cliApiToken: cliToken, workbenchWebToken: webToken, workbenchCredentialIssuedAt: Date.now() },
         publicUrl: 'http://127.0.0.1:9'
-    }, async ({ output }) => {
-        await expect(printWorkbenchLoginQr()).rejects.toThrow('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
-        expect(output()).not.toContain(cliToken)
+    }, async ({ logs, output }) => {
+        await printWorkbenchLoginQr()
+        expect(logs()).toContain(`http://127.0.0.1:9/?token=${cliToken}`)
         expect(output()).not.toContain(webToken)
+        expect(logs().some(line => line.startsWith('手机登录凭据'))).toBe(false)
     })
 })
 

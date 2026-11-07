@@ -424,6 +424,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
             // Use raw text only, ignore attachments for special commands
@@ -443,6 +445,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
             // Use raw text only, ignore attachments for special commands
@@ -476,6 +480,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
 
@@ -502,6 +508,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
+            hasAttachments: Boolean(message.content.attachments?.length),
+            nonTextContent: typeof message.content.text !== 'string',
             disallowedTools: messageDisallowedTools
         };
         messageQueue.push(formattedText, enhancedMode, localId);
