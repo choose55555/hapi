@@ -39,7 +39,16 @@ function createSessionStub() {
     let metadata: Metadata = { path: '/tmp/test', host: 'localhost' }
     return {
         session: {
-            localPermissionBridge: { start: vi.fn(), stop: vi.fn(), onTranscript: vi.fn() },
+            localPermissionBridge: {
+                start: vi.fn(),
+                stop: vi.fn(),
+                onTranscript: vi.fn(),
+                setInputStateListener: vi.fn(),
+                isNativeProcessObserved: () => false,
+                isNativeInputReady: () => false,
+                hasPendingRequests: () => false,
+                waitForIdle: () => Promise.resolve()
+            },
             sessionId: 'test-session',
             thinking: false,
             localTurnStartedAt: 0,

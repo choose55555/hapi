@@ -235,4 +235,73 @@ describe('LocalPermissionBridge', () => {
         ] })
         h.bridge.stop()
     })
+
+    it('keeps native input blocked after hook reply until actual tool completion', async () => {
+        const h = setup()
+        expect(h.bridge.hasPendingRequests()).toBe(false)
+
+        h.observe('tool-1')
+        const decision1 = h.request()
+        expect(h.bridge.hasPendingRequests()).toBe(true)
+
+        let idleResolved = false
+        const idlePromise = h.bridge.waitForIdle().then(() => {
+            idleResolved = true
+        })
+        await Promise.resolve()
+        expect(idleResolved).toBe(false)
+
+        h.reply({ id: h.id(), approved: false })
+        await decision1
+        await Promise.resolve()
+        expect(idleResolved).toBe(false)
+        expect(h.bridge.hasPendingRequests()).toBe(true)
+        h.finish()
+        await idlePromise
+        expect(idleResolved).toBe(true)
+        expect(h.bridge.hasPendingRequests()).toBe(false)
+
+        // Also test settling via native finishTool (PostToolUse)
+        h.observe('tool-2')
+        const decision2 = h.request()
+        expect(h.bridge.hasPendingRequests()).toBe(true)
+        let idle2Resolved = false
+        const idlePromise2 = h.bridge.waitForIdle().then(() => {
+            idle2Resolved = true
+        })
+        h.finish({}, 'tool-2')
+        await decision2
+        await idlePromise2
+        expect(idle2Resolved).toBe(true)
+        expect(h.bridge.hasPendingRequests()).toBe(false)
+        h.bridge.stop()
+    })
+})
+
+
+it('hook timeout does not unblock native permission input', async () => {
+    const h = setup()
+    h.observe()
+    const controller = new AbortController()
+    const decision = h.request(question, controller.signal)
+    controller.abort()
+    await decision
+    expect(h.bridge.hasPendingRequests()).toBe(true)
+    h.finish()
+    expect(h.bridge.hasPendingRequests()).toBe(false)
+    h.bridge.stop()
+})
+
+it('starts without readiness, needs a fresh native prompt, resets on SessionEnd', () => {
+    const h = setup()
+    expect(h.bridge.isNativeProcessObserved()).toBe(false)
+    expect(h.bridge.isNativeInputReady()).toBe(false)
+    h.bridge.onHook({ session_id: 'native-1', hook_event_name: 'SessionStart' })
+    expect(h.bridge.isNativeProcessObserved()).toBe(true)
+    expect(h.bridge.isNativeInputReady()).toBe(false)
+    h.bridge.onHook({ session_id: 'native-1', hook_event_name: 'UserPromptSubmit' })
+    expect(h.bridge.isNativeInputReady()).toBe(true)
+    h.bridge.onHook({ session_id: 'native-1', hook_event_name: 'SessionEnd' })
+    expect(h.bridge.isNativeInputReady()).toBe(false)
+    h.bridge.stop()
 })

@@ -34,7 +34,7 @@ import {
 import { CREATABLE_AGENT_FLAVORS } from '@hapi/protocol/modes'
 import { PermissionModeSchema } from '@hapi/protocol/schemas'
 import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
-import { applySessionDisplayRename, normalizeSessionDisplayTitle } from "@/agent/sessionDisplayRename";
+import { applySessionDisplayRename, changeTitleResultIfTerminalTab, changeTitleToolText, normalizeSessionDisplayTitle } from "@/agent/sessionDisplayRename";
 import { SpawnPeerError, spawnPeer } from "@/modules/spawnPeer/spawnPeer";
 
 type StartHappyServerOptions = {
@@ -114,6 +114,8 @@ function createHapiMcpServer(
             if (client.getMetadata()?.titleLocked) {
                 return { success: false, error: 'Session title is locked by the user. Only the user can unlock it.' };
             }
+            const keptTabName = changeTitleResultIfTerminalTab(client.getMetadata());
+            if (keptTabName) return keptTabName;
             if (!emitTitleSummary) {
                 // Codex collab: acknowledge the tool call without writing.
                 // Parent-thread mcp_tool_call_end applies the rename later.
@@ -262,27 +264,15 @@ function createHapiMcpServer(
             const response = await handler(args.title);
             logger.debug('[hapiMCP] Response:', response);
             const displayTitle = normalizeSessionDisplayTitle(args.title) ?? args.title;
-
-            if (response.success) {
-                return {
-                    content: [
-                        {
-                            type: 'text' as const,
-                            text: `Successfully changed chat title to: "${displayTitle}"`,
-                        },
-                    ],
-                    isError: false,
-                };
-            }
-
+            const spoken = changeTitleToolText(response, displayTitle);
             return {
                 content: [
                     {
                         type: 'text' as const,
-                        text: `Failed to change chat title: ${response.error || 'Unknown error'}`,
+                        text: spoken.text,
                     },
                 ],
-                isError: true,
+                isError: spoken.isError,
             };
         });
     }

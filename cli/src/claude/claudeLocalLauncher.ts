@@ -7,6 +7,16 @@ import { applySessionTitleFallback } from './utils/sessionTitleFallback';
 import { resolveClaudeLaunchModel } from './utils/claudeSettings';
 import type { RawJSONLines } from './types';
 import { ClaudeToolResultImages } from './utils/toolResultImages';
+import { ConsoleMessageInjector, type Kernel32ConsoleFfi } from './utils/consoleInject';
+import { createLocalMessageDrain } from './utils/localMessageDrain';
+
+
+export interface ClaudeLocalLauncherDeps {
+    platform?: NodeJS.Platform;
+    ffi?: Kernel32ConsoleFfi;
+    stashDelayMs?: number;
+    sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+}
 
 // Local transcripts carry bare model ids and no context_window, so the web
 // guesses 200k. When the TUI runs a "[1m]" model, stamp 1M on messages from
@@ -28,7 +38,10 @@ function isInterruptMarker(message: RawJSONLines): boolean {
         block.type === 'text' && typeof block.text === 'string' && block.text.startsWith('[Request interrupted by user'));
 }
 
-export async function claudeLocalLauncher(session: Session): Promise<'switch' | 'exit'> {
+export async function claudeLocalLauncher(
+    session: Session,
+    deps: ClaudeLocalLauncherDeps = {}
+): Promise<'switch' | 'exit'> {
     const toolResultImages = new ClaudeToolResultImages();
 
     // Create scanner
@@ -76,6 +89,43 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
     };
     session.addSessionFoundCallback(handleSessionFound);
 
+    const platform = deps.platform ?? process.platform;
+    let processState: 'starting' | 'running' | 'exited' = 'starting';
+    const localAbortController = new AbortController();
+
+    const injector = platform === 'win32'
+        ? new ConsoleMessageInjector({
+            isProcessAlive: () => processState !== 'exited' && session.localPermissionBridge.isNativeProcessObserved(),
+            hasPendingPermissions: () => session.localPermissionBridge.hasPendingRequests?.() ?? false,
+            waitForPermissionsIdle: (signal) =>
+                session.localPermissionBridge.waitForIdle?.(signal ?? localAbortController.signal) ?? Promise.resolve(),
+            abortSignal: localAbortController.signal,
+            ffi: deps.ffi,
+            stashDelayMs: deps.stashDelayMs,
+            sleep: deps.sleep,
+            platform
+        })
+        : null;
+
+    const drainQueuedMessagesOnWindows = createLocalMessageDrain({
+        queue: session.queue,
+        injector: injector!,
+        client: session.client,
+        signal: localAbortController.signal,
+        isExited: () => processState === 'exited',
+        isReady: () => {
+            if (session.localPermissionBridge.isNativeProcessObserved()) processState = 'running';
+            return processState === 'running' && session.localPermissionBridge.isNativeInputReady();
+        },
+        isPermissionBlocked: () => session.localPermissionBridge.hasPendingRequests(),
+        platform,
+    });
+
+    if (injector) session.localPermissionBridge.setInputStateListener(() => {
+        if (!localAbortController.signal.aborted) void drainQueuedMessagesOnWindows().then(outcome => {
+            if (outcome === 'switch') launcher.control.requestSwitch();
+        });
+    });
 
     const launcher = new BaseLocalLauncher({
         label: 'local',
@@ -84,7 +134,19 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
         rpcHandlerManager: session.client.rpcHandlerManager,
         startedBy: session.startedBy,
         startingMode: session.startingMode,
+        onQueuedMessage: injector ? drainQueuedMessagesOnWindows : undefined,
         launch: async (abortSignal) => {
+            const forwardAbort = () => {
+                if (!localAbortController.signal.aborted) {
+                    localAbortController.abort();
+                }
+            };
+            if (abortSignal.aborted) {
+                forwardAbort();
+            } else {
+                abortSignal.addEventListener('abort', forwardAbort, { once: true });
+            }
+            processState = 'starting';
             session.localPermissionBridge.start(session.sessionId);
             abortSignal.addEventListener('abort', session.localPermissionBridge.stop, { once: true });
             session.localContextModel = resolveClaudeLaunchModel({
@@ -107,6 +169,8 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
                     hookSettingsPath: session.localHookSettingsPath,
                 });
             } finally {
+                processState = 'exited';
+                abortSignal.removeEventListener('abort', forwardAbort);
                 abortSignal.removeEventListener('abort', session.localPermissionBridge.stop);
                 session.localPermissionBridge.stop();
             }
@@ -127,6 +191,11 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
         return await launcher.run();
     } finally {
         // Cleanup
+        session.localPermissionBridge.setInputStateListener(null);
+        processState = 'exited';
+        if (!localAbortController.signal.aborted) {
+            localAbortController.abort();
+        }
         session.onThinkingChange(false);
         session.localPermissionBridge.stop();
         session.removeSessionFoundCallback(handleSessionFound);
