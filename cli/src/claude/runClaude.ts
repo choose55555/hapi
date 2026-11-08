@@ -10,6 +10,7 @@ import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
+import { readSelectedWindowsTerminalTabs, syncLocalWindowsTerminalTabName, TERMINAL_TAB_NAME_SOURCE } from './utils/windowsTerminalTabName';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/modules/common/hooks/generateHookSettings';
 import { forwardClaudeAutoCompactionStart } from './utils/autoCompactionHook';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
@@ -197,6 +198,24 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 const event = data.hook_event_name;
                 if (event === 'UserPromptSubmit') {
                     currentSession.localTurnStartedAt = Date.now();
+                    const promptSession = currentSession;
+                    const promptText = data.prompt;
+                    void syncLocalWindowsTerminalTabName({
+                        platform: process.platform,
+                        mode: promptSession.mode,
+                        prompt: promptText,
+                        isPhoneInject: (text) => promptSession.client.hasPendingHubPromptEcho(text),
+                        readTabs: () => readSelectedWindowsTerminalTabs(),
+                        currentName: () => promptSession.client.getMetadata()?.name,
+                        currentNameSource: () => promptSession.client.getMetadata()?.nameSource,
+                        applyName: (name) => {
+                            promptSession.client.updateMetadata((metadata) => (
+                                metadata.name === name && metadata.nameSource === TERMINAL_TAB_NAME_SOURCE
+                                    ? metadata
+                                    : { ...metadata, name, nameSource: TERMINAL_TAB_NAME_SOURCE }
+                            ));
+                        }
+                    }).catch(() => undefined);
                 }
                 const thinking = event === 'UserPromptSubmit' || event === 'PreToolUse' ? true
                     : event === 'Stop' || event === 'StopFailure' || event === 'SessionEnd' ? false
@@ -424,6 +443,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
             // Use raw text only, ignore attachments for special commands
@@ -443,6 +464,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
             // Use raw text only, ignore attachments for special commands
@@ -476,6 +499,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                 customSystemPrompt: messageCustomSystemPrompt,
                 appendSystemPrompt: messageAppendSystemPrompt,
                 allowedTools: messageAllowedTools,
+                hasAttachments: Boolean(message.content.attachments?.length),
+                nonTextContent: typeof message.content.text !== 'string',
                 disallowedTools: messageDisallowedTools
             };
 
@@ -502,6 +527,8 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             customSystemPrompt: messageCustomSystemPrompt,
             appendSystemPrompt: messageAppendSystemPrompt,
             allowedTools: messageAllowedTools,
+            hasAttachments: Boolean(message.content.attachments?.length),
+            nonTextContent: typeof message.content.text !== 'string',
             disallowedTools: messageDisallowedTools
         };
         messageQueue.push(formattedText, enhancedMode, localId);

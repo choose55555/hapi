@@ -3,6 +3,9 @@ import type { Metadata } from '@/api/types';
 
 type SessionDisplayRenameClient = Pick<ApiSessionClient, 'updateMetadata'>;
 
+/** Session name copied from the selected Windows Terminal tab. Not titleLocked. */
+export const TERMINAL_TAB_NAME_SOURCE = 'terminal-tab';
+
 /**
  * Explicit agent/operator rename: set metadata.name (same field as web
  * renameSession / PATCH /sessions/:id). Distinct from native/generated
@@ -16,6 +19,32 @@ export function normalizeSessionDisplayTitle(title: unknown): string | null {
     return normalized.length > 0 ? normalized : null;
 }
 
+/**
+ * change_title keeps a tab name. Success, so the model does not retry.
+ * unchanged tells the tool text not to claim the title was replaced.
+ */
+export function changeTitleResultIfTerminalTab(
+    metadata: { nameSource?: unknown } | null | undefined
+): { success: true; unchanged: true } | null {
+    if (metadata?.nameSource === TERMINAL_TAB_NAME_SOURCE) {
+        return { success: true, unchanged: true };
+    }
+    return null;
+}
+
+export function changeTitleToolText(
+    response: { success: boolean; error?: string; unchanged?: boolean },
+    displayTitle: string
+): { text: string; isError: boolean } {
+    if (response.success && response.unchanged) {
+        return { text: 'Session name stays the Windows Terminal tab name.', isError: false };
+    }
+    if (response.success) {
+        return { text: `Successfully changed chat title to: "${displayTitle}"`, isError: false };
+    }
+    return { text: `Failed to change chat title: ${response.error || 'Unknown error'}`, isError: true };
+}
+
 export function applySessionDisplayRename(
     client: SessionDisplayRenameClient,
     title: unknown
@@ -27,6 +56,7 @@ export function applySessionDisplayRename(
 
     client.updateMetadata((metadata: Metadata) => {
         if (metadata.titleLocked) return metadata;
+        if ((metadata as { nameSource?: unknown }).nameSource === TERMINAL_TAB_NAME_SOURCE) return metadata;
         if (metadata.name?.trim() === normalized) {
             return metadata;
         }

@@ -25,11 +25,40 @@ function directAccessUrl(publicUrl: string, token: string): string {
     return url.toString()
 }
 
+async function printDirectAccessQr(directUrl: string): Promise<void> {
+    console.log(directUrl)
+    try {
+        const qrString = await QRCode.toString(directUrl, {
+            type: 'terminal',
+            small: true,
+            margin: 1,
+            errorCorrectionLevel: 'L'
+        })
+        console.log('')
+        console.log(qrString)
+    } catch {
+        // Same as startHub: a QR failure still leaves the address on screen.
+    }
+}
+
 // Read-only on purpose: this must work while the hub is running, so it does not
 // take the lifecycle lease or probe the listen port, and it writes no log file.
+// When the 30-day switch is off, web login accepts cliApiToken, so the QR carries
+// that token and still does not start the hub or require a remote window.
 export async function printWorkbenchLoginQr(): Promise<void> {
     const ttlMs = parseCredentialTtl(process.env.HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS)
-    if (ttlMs === null) throw new Error('HAPI_WORKBENCH_CREDENTIAL_TTL_DAYS must be enabled')
+    if (ttlMs === null) {
+        const settings = await readSettingsOrThrow(getSettingsFile(workbenchDataDir()))
+        const publicUrl = process.env.HAPI_PUBLIC_URL?.trim()
+        if (!publicUrl) throw new Error('HAPI_PUBLIC_URL is required')
+        const token = settings.cliApiToken
+        if (typeof token !== 'string' || token.length === 0) {
+            throw new Error('settings.json has no CLI login token')
+        }
+        await printDirectAccessQr(directAccessUrl(publicUrl, token))
+        return
+    }
+
     const settings = await readSettingsOrThrow(getSettingsFile(workbenchDataDir()))
     const token = settings.workbenchWebToken
     const issuedAt = settings.workbenchCredentialIssuedAt
@@ -47,19 +76,6 @@ export async function printWorkbenchLoginQr(): Promise<void> {
     if (typeof settings.cliApiToken === 'string' && settings.cliApiToken.length > 0 && token === settings.cliApiToken) {
         throw new Error('Web login token must be distinct from the CLI token; run hapi hub revoke-credential')
     }
-    const directUrl = directAccessUrl(publicUrl, token)
     console.log(`手机登录凭据 ${formatExpiry(issuedAt + ttlMs)} 到期（北京时间）`)
-    console.log(directUrl)
-    try {
-        const qrString = await QRCode.toString(directUrl, {
-            type: 'terminal',
-            small: true,
-            margin: 1,
-            errorCorrectionLevel: 'L'
-        })
-        console.log('')
-        console.log(qrString)
-    } catch {
-        // Same as startHub: a QR failure still leaves the address on screen.
-    }
+    await printDirectAccessQr(directAccessUrl(publicUrl, token))
 }

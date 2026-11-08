@@ -4,8 +4,12 @@ import type { DecryptedMessage } from '@/types/api'
 import type { NormalizedMessage } from '@/chat/types'
 import { isCodexContent, isSkippableAgentContent, normalizeAgentRecord } from '@/chat/normalizeAgent'
 import { normalizeUserRecord } from '@/chat/normalizeUser'
+import { isTranscriptEchoContent } from './transcriptEcho'
 
 export function normalizeDecryptedMessage(message: DecryptedMessage): NormalizedMessage | null {
+    if (isTranscriptEchoContent(message.content)) {
+        return null
+    }
     const record = unwrapRoleWrappedRecordEnvelope(message.content)
     if (!record) {
         return {

@@ -576,6 +576,9 @@ export function extractSearchableMessageText(
 ): SearchableMessage | null {
     const record = unwrapRoleWrappedRecordEnvelope(value)
     if (!record) return null
+    // Phone text is already stored from the webapp. Do not index the CLI echo.
+    // Rows already in the search index are not rebuilt here.
+    if (isObject(record.meta) && record.meta.isTranscriptEcho === true) return null
 
     if (record.role === 'user') {
         const extracted = extractUserPlainTextWithMetadata(record.content, context?.maxSourceCharacters)

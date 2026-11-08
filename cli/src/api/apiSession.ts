@@ -37,6 +37,7 @@ import type {
 } from './types'
 import { AgentStateSchema, CliMessagesResponseSchema, MetadataSchema, UserMessageSchema } from './types'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
+import { isPendingHubPromptEcho } from '../claude/utils/pendingHubPromptEcho'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
 import { cleanupUploadDir, preserveUploadDirOnExit } from '../modules/common/handlers/uploads'
 import { TerminalManager } from '@/terminal/TerminalManager'
@@ -786,6 +787,11 @@ export class ApiSessionClient extends EventEmitter {
         if (this.pendingHubPromptEchoes.length > 32) {
             this.pendingHubPromptEchoes.shift()
         }
+    }
+
+    /** True while this text is still a phone inject waiting for its transcript echo. Does not consume the marker. */
+    hasPendingHubPromptEcho(text: string): boolean {
+        return isPendingHubPromptEcho(this.pendingHubPromptEchoes, text)
     }
 
     discardPendingHubPromptEcho(localId: string): void {

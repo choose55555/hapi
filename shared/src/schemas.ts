@@ -58,6 +58,10 @@ export const MetadataSchema = z.object({
     host: z.string(),
     version: z.string().optional(),
     name: z.string().optional(),
+    // Set when metadata.name was copied from the selected Windows Terminal tab.
+    // change_title keeps that name. A later tab sync may replace it. A plain
+    // string so an unexpected value does not fail the whole metadata parse.
+    nameSource: z.string().optional(),
     titleLocked: z.boolean().optional(),
     os: z.string().optional(),
     summary: MetadataSummarySchema.optional(),

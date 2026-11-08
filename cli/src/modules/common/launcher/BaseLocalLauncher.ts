@@ -14,6 +14,8 @@ type RpcHandlerManagerLike = {
     registerHandler(method: string, handler: () => Promise<void> | void): void
 }
 
+export type QueuedMessageOutcome = 'handled' | 'switch' | void
+
 export type LocalLauncherControl = {
     abortSignal: AbortSignal
     requestExit: () => void
@@ -30,6 +32,7 @@ export type LocalLauncherOptions = {
     startingMode?: 'local' | 'remote'
     launch: (signal: AbortSignal) => Promise<void>
     onLaunchSuccess?: () => Promise<void> | void
+    onQueuedMessage?: () => Promise<QueuedMessageOutcome> | QueuedMessageOutcome
     sendFailureMessage: (message: string) => void
     recordLocalLaunchFailure: (message: string, exitReason: LocalLaunchExitReason) => void
     abortLogMessage?: string
@@ -41,7 +44,8 @@ export class BaseLocalLauncher {
     private readonly abortController = new AbortController()
     private readonly exitFuture = new Future<void>()
 
-    constructor(private readonly options: LocalLauncherOptions) {}
+    private readonly options: LocalLauncherOptions
+    constructor(options: LocalLauncherOptions) { this.options = options }
 
     get control(): LocalLauncherControl {
         return {
@@ -62,6 +66,7 @@ export class BaseLocalLauncher {
             startingMode,
             launch,
             onLaunchSuccess,
+            onQueuedMessage,
             sendFailureMessage,
             recordLocalLaunchFailure,
             abortLogMessage = 'abort requested',
@@ -89,17 +94,32 @@ export class BaseLocalLauncher {
                 await abortProcess()
             }
 
+            const handleQueuedMessage = async () => {
+                if (!onQueuedMessage) {
+                    await doSwitch()
+                    return
+                }
+                try {
+                    const outcome = await onQueuedMessage()
+                    if (outcome === 'switch') {
+                        await doSwitch()
+                    }
+                } catch (error) {
+                    logger.debug(`[${label}]: onQueuedMessage error`, error)
+                }
+            }
+
             rpcHandlerManager.registerHandler(RPC_METHODS.Abort, doAbort)
             rpcHandlerManager.registerHandler(RPC_METHODS.Switch, doSwitch)
             queue.setOnMessage(() => {
-                void doSwitch()
+                void handleQueuedMessage()
             })
 
             if (this.exitReason) {
                 return this.exitReason
             }
 
-            if (queue.size() > 0) {
+            if (queue.size() > 0 && !onQueuedMessage) {
                 return 'switch'
             }
 
@@ -110,7 +130,11 @@ export class BaseLocalLauncher {
 
                 logger.debug(`[${label}]: launch`)
                 try {
-                    await launch(this.abortController.signal)
+                    const launchPromise = launch(this.abortController.signal)
+                    if (onQueuedMessage && queue.size() > 0) {
+                        void handleQueuedMessage()
+                    }
+                    await launchPromise
                     if (onLaunchSuccess) {
                         await onLaunchSuccess()
                     }
