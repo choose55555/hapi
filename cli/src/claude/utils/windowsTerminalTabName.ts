@@ -6,6 +6,12 @@ export const TERMINAL_TAB_NAME_SOURCE = 'terminal-tab';
 const TERMINAL_TEXT_CAP = 200_000;
 // Cold start of UI Automation was measured at 3026 ms, so 3 seconds timed out.
 export const READ_TIMEOUT_MS = 8_000;
+export const TAB_RESULT_MAX_AGE_MS = 1_500;
+
+export type TabNameSyncState = { turn: number; pendingName?: string; pendingFromName?: string };
+export function createTabNameSyncState(): TabNameSyncState {
+    return { turn: 0 };
+}
 
 export type SelectedTab = { name: string; text: string };
 
@@ -187,20 +193,46 @@ export type TabNameSyncInput = {
     currentName: () => string | undefined;
     currentNameSource?: () => string | undefined;
     applyName: (name: string) => void;
+    submittedAt?: number;
+    now?: () => number;
+    state?: TabNameSyncState;
 };
 
 export async function syncLocalWindowsTerminalTabName(input: TabNameSyncInput): Promise<'skipped' | 'kept' | 'renamed'> {
+    const state = input.state ?? createTabNameSyncState();
+    const turn = ++state.turn;
+    const previousCandidate = state.pendingName;
+    const previousFromName = state.pendingFromName;
+    state.pendingName = undefined;
+    state.pendingFromName = undefined;
     try {
+        const now = input.now ?? Date.now;
+        const submittedAt = input.submittedAt ?? now();
+        const fresh = () => {
+            const age = now() - submittedAt;
+            return Number.isFinite(age) && age >= 0 && age <= TAB_RESULT_MAX_AGE_MS;
+        };
         if (input.platform !== 'win32') return 'skipped';
         if (input.mode !== 'local') return 'skipped';
         if (typeof input.prompt !== 'string') return 'skipped';
         if (promptMatchFragment(input.prompt) === null) return 'skipped';
         if (input.isPhoneInject(input.prompt)) return 'skipped';
+        if (!fresh()) return 'kept';
+        const originalName = input.currentName();
+        const originalSource = input.currentNameSource?.();
         const tabs = await input.readTabs();
+        if (state.turn !== turn || !fresh()) return 'kept';
+        if (input.currentName() !== originalName || input.currentNameSource?.() !== originalSource) return 'kept';
         if (tabs === null) return 'kept';
         const name = chooseTabName(input.prompt, tabs);
         if (!name) return 'kept';
         if (input.currentName() === name && input.currentNameSource?.() === TERMINAL_TAB_NAME_SOURCE) return 'kept';
+        if (originalName?.trim() && originalSource === TERMINAL_TAB_NAME_SOURCE
+            && (previousCandidate !== name || previousFromName !== originalName)) {
+            state.pendingName = name;
+            state.pendingFromName = originalName;
+            return 'kept';
+        }
         input.applyName(name);
         return 'renamed';
     } catch {
