@@ -10,7 +10,7 @@ import { parseSpecialCommand } from '@/parsers/specialCommands';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
-import { readSelectedWindowsTerminalTabs, syncLocalWindowsTerminalTabName, TERMINAL_TAB_NAME_SOURCE } from './utils/windowsTerminalTabName';
+import { createTabNameSyncState, readSelectedWindowsTerminalTabs, syncLocalWindowsTerminalTabName, TAB_RESULT_MAX_AGE_MS, TERMINAL_TAB_NAME_SOURCE, type TabNameSyncState } from './utils/windowsTerminalTabName';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/modules/common/hooks/generateHookSettings';
 import { forwardClaudeAutoCompactionStart } from './utils/autoCompactionHook';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
@@ -92,6 +92,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     logger.debug(`Session created: ${sessionInfo.id}`);
 
     const currentSessionRef: { current: Session | null } = { current: null };
+    const terminalTabSyncStates = new WeakMap<Session, TabNameSyncState>();
     let resolveSessionReady!: (session: Session) => void;
     const sessionReady = new Promise<Session>((resolve) => {
         resolveSessionReady = resolve;
@@ -200,12 +201,19 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                     currentSession.localTurnStartedAt = Date.now();
                     const promptSession = currentSession;
                     const promptText = data.prompt;
+                    let tabSyncState = terminalTabSyncStates.get(promptSession);
+                    if (!tabSyncState) {
+                        tabSyncState = createTabNameSyncState();
+                        terminalTabSyncStates.set(promptSession, tabSyncState);
+                    }
                     void syncLocalWindowsTerminalTabName({
+                        submittedAt: promptSession.localTurnStartedAt,
+                        state: tabSyncState,
                         platform: process.platform,
                         mode: promptSession.mode,
                         prompt: promptText,
                         isPhoneInject: (text) => promptSession.client.hasPendingHubPromptEcho(text),
-                        readTabs: () => readSelectedWindowsTerminalTabs(),
+                        readTabs: () => readSelectedWindowsTerminalTabs({ timeoutMs: TAB_RESULT_MAX_AGE_MS }),
                         currentName: () => promptSession.client.getMetadata()?.name,
                         currentNameSource: () => promptSession.client.getMetadata()?.nameSource,
                         applyName: (name) => {
