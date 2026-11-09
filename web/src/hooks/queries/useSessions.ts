@@ -1,8 +1,9 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { compareSessionSummaries, mergeReadState } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
 import type { SessionsResponse, SessionSummary } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
+import { removeSummary, setSummaryActive } from '@/lib/listOnlineFreshness'
 
 export type UseSessionsOptions = {
     enabled?: boolean
@@ -47,4 +48,20 @@ export function useSessions(api: ApiClient | null, options: UseSessionsOptions =
         error: query.error instanceof Error ? query.error.message : query.error ? 'Failed to load sessions' : null,
         refetch: query.refetch,
     }
+}
+
+export function invalidateSessionList(queryClient: QueryClient): Promise<unknown> {
+    return queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+}
+
+export function correctSessionListActive(queryClient: QueryClient, sessionId: string, active: boolean): void {
+    queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) =>
+        setSummaryActive(previous, sessionId, active)
+    )
+}
+
+export function removeDeletedSessionFromList(queryClient: QueryClient, sessionId: string): void {
+    queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) =>
+        removeSummary(previous, sessionId)
+    )
 }

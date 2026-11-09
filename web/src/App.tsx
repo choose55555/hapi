@@ -10,7 +10,15 @@ import { useAuthSource } from '@/hooks/useAuthSource'
 import { useServerUrl } from '@/hooks/useServerUrl'
 import { useSSE } from '@/hooks/useSSE'
 import { useDelayedFlag } from '@/hooks/useDelayedFlag'
-import { useSessions } from '@/hooks/queries/useSessions'
+import { correctSessionListActive, invalidateSessionList, removeDeletedSessionFromList, useSessions } from '@/hooks/queries/useSessions'
+import {
+    bindListOfflineVerifier,
+    createListOnlinePageController,
+    createListRefreshGate,
+    planSessionListRefresh,
+    readSessionActive,
+    setDetailActive
+} from '@/lib/listOnlineFreshness'
 import { useReconnectingState } from '@/hooks/useReconnectingState'
 import { useSyncingState } from '@/hooks/useSyncingState'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
@@ -42,7 +50,7 @@ import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
-import type { SyncEvent } from '@/types/api'
+import type { SessionResponse, SyncEvent } from '@/types/api'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
@@ -183,6 +191,8 @@ function AppInner() {
     const syncTokenRef = useRef(0)
     const isFirstConnectRef = useRef(true)
     const baseUrlRef = useRef(baseUrl)
+    const listRefreshGateRef = useRef(createListRefreshGate())
+    const listOnlineRef = useRef<ReturnType<typeof createListOnlinePageController> | null>(null)
     const pushPromptedRef = useRef(false)
     const { appBadgeEnabled: appBadgePreferenceEnabled } = useAppBadgePreference()
     const appBadgeEnabled = Boolean(api && token && appBadgePreferenceEnabled && canUseAppBadging())
@@ -207,6 +217,7 @@ function AppInner() {
         baseUrlRef.current = baseUrl
         isFirstConnectRef.current = true
         syncTokenRef.current = 0
+        listRefreshGateRef.current = createListRefreshGate()
         queryClient.clear()
     }, [baseUrl, queryClient])
 
@@ -259,16 +270,28 @@ function AppInner() {
         // Clear disconnected state on successful connection
         reportSseConnect()
 
-        // The hub replayed every event missed during the gap, so the caches
-        // are already consistent - the full refetch below would only re-download
-        // what the replay just delivered. First connects and long gaps arrive
-        // with resumed=false and take the resync path.
-        if (info.resumed && !isFirstConnectRef.current) {
+        // A successful replay does not repair a list that was already stale.
+        // Refresh that list on every successful connect, including replay, but
+        // at most once every 5 seconds. Detail messages stay on the resync
+        // path below, which replay does not take.
+        const plan = planSessionListRefresh({
+            reason: 'connect',
+            resumed: info.resumed,
+            isFirstConnect: isFirstConnectRef.current,
+            now: Date.now(),
+            gate: listRefreshGateRef.current
+        })
+        if (plan.refreshList) {
+            void invalidateSessionList(queryClient).catch((error) => {
+                console.error('Failed to refresh session list:', error)
+            })
+        }
+        if (!plan.refreshMessages) {
             return
         }
 
         // Increment token to track this specific connection
-        const token = ++syncTokenRef.current
+        const syncToken = ++syncTokenRef.current
 
         // Only force show banner on first connect (page load)
         // Subsequent connects (session switches) use non-forced mode
@@ -280,12 +303,12 @@ function AppInner() {
             startSync()
         }
         const invalidations = [
-            queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
             // Invalidate ALL cached session-detail entries on reconnect, not just
             // the selected one.  With `SESSION_DETAIL_STALE_TIME_MS` extending the
             // freshness window on `useSession`, a previously-viewed session that
             // received updates during the SSE gap would otherwise serve stale
             // cached data on remount.  See tiann/hapi#884.
+            // The session list is refreshed above, and is not repeated here.
             queryClient.invalidateQueries({ queryKey: ['session'] }),
             refreshAllAgyCatalogs(queryClient)
         ]
@@ -298,11 +321,79 @@ function AppInner() {
             })
             .finally(() => {
                 // Only end sync if this is still the latest connection
-                if (syncTokenRef.current === token) {
+                if (syncTokenRef.current === syncToken) {
                     endSync()
                 }
             })
     }, [api, queryClient, selectedSessionId, startSync, endSync, reportSseConnect])
+
+    useEffect(() => {
+        if (!api) {
+            listOnlineRef.current = null
+            bindListOfflineVerifier(null)
+            return
+        }
+        const controller = createListOnlinePageController({
+            schedule(delayMs, run) {
+                const timer = setTimeout(() => {
+                    void run()
+                }, delayMs)
+                return {
+                    cancel() {
+                        clearTimeout(timer)
+                    }
+                }
+            },
+            fetchSession(sessionId) {
+                return readSessionActive((id) => api.getSession(id), sessionId)
+            },
+            writeListActive(id, value) {
+                correctSessionListActive(queryClient, id, value)
+            },
+            writeDetailActive(id, value) {
+                queryClient.setQueryData<SessionResponse | undefined>(queryKeys.session(id), (previous) =>
+                    setDetailActive(previous, value)
+                )
+            },
+            removeSession(sessionId) {
+                removeDeletedSessionFromList(queryClient, sessionId)
+                void queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) })
+                clearMessageWindow(sessionId)
+            }
+        })
+        listOnlineRef.current = controller
+        return () => {
+            controller.dispose()
+            if (listOnlineRef.current === controller) {
+                listOnlineRef.current = null
+            }
+        }
+    }, [api, queryClient])
+
+    useEffect(() => {
+        const controller = listOnlineRef.current
+        if (!api || !token || !controller) {
+            return
+        }
+        return controller.attachVisibility({
+            eventTarget: {
+                addEventListener(type, listener) {
+                    document.addEventListener(type, listener)
+                },
+                removeEventListener(type, listener) {
+                    document.removeEventListener(type, listener)
+                }
+            },
+            readVisibility: () => document.visibilityState,
+            getGate: () => listRefreshGateRef.current,
+            now: () => Date.now(),
+            invalidateList: () => {
+                void invalidateSessionList(queryClient).catch((error) => {
+                    console.error('Failed to refresh session list:', error)
+                })
+            }
+        })
+    }, [api, queryClient, token])
 
     const handleSseDisconnect = useCallback((reason: string) => {
         // Only show reconnecting banner if we've already connected once

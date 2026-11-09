@@ -26,6 +26,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { applyAgyCatalogAnnouncement } from '@/lib/agyCatalogAnnouncement'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, markMessagesIndeterminate, markMessagesDispatching, markMessagesRequeued, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 import { applySessionDetailPatch } from '@/lib/sessionPatch'
+import { deliverListedSessionPatch, deliverListedSessionUpsert } from '@/lib/listOnlineFreshness'
 
 // Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
 // with the fixture generator); re-exported here so hook consumers and existing
@@ -470,6 +471,9 @@ export function useSSE(options: {
         }
 
         const upsertSessionSummary = (session: Session) => {
+            const listed = queryClient.getQueryData<SessionsResponse | undefined>(queryKeys.sessions)
+            const listedSession = listed?.sessions.find((item) => item.id === session.id)
+            deliverListedSessionUpsert(listedSession?.active, session)
             queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) => {
                 if (!previous) {
                     return previous
@@ -499,6 +503,9 @@ export function useSSE(options: {
         }
 
         const patchSessionSummary = (sessionId: string, patch: SessionPatch): boolean => {
+            const listed = queryClient.getQueryData<SessionsResponse | undefined>(queryKeys.sessions)
+            const listedSession = listed?.sessions.find((item) => item.id === sessionId)
+            deliverListedSessionPatch(listedSession?.active, sessionId, patch)
             let patched = false
             queryClient.setQueryData<SessionsResponse | undefined>(queryKeys.sessions, (previous) => {
                 if (!previous) {
