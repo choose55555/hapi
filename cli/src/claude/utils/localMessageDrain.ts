@@ -8,12 +8,12 @@ type Client = {
     sendSessionEvent(event: { type: 'message'; message: string }): void
 }
 
-const LOCAL_UNSUPPORTED_NOTICE = '此类消息（斜杠命令、$ 技能、附件、内部消息）在本地窗口不支持，请在电脑上发；窗口未重开'
+const LOCAL_UNSUPPORTED_NOTICE = '此类消息（$ 技能、附件、内部消息）在本地窗口不支持，请在电脑上发；窗口未重开'
 
 export function requiresRemoteSwitch(item: { message: unknown; mode: EnhancedMode; internal?: boolean }): boolean {
     return typeof item.message !== 'string' || item.mode.hasAttachments === true
         || item.mode.nonTextContent === true || item.internal === true
-        || /^\s*[/\u0024]/.test(item.message)
+        || /^\s*\u0024/.test(item.message)
 }
 
 export function createLocalMessageDrain(options: {
@@ -66,7 +66,7 @@ export function createLocalMessageDrain(options: {
             while (!halted && options.queue.size() > 0) {
                 const front = options.queue.queue[0]
                 if (!front) return 'handled'
-                if (requiresRemoteSwitch(front)) {
+                if (requiresRemoteSwitch(front) || (!windowsLocal && typeof front.message === 'string' && /^\s*\//.test(front.message))) {
                     if (!windowsLocal) return 'switch'
                     if (!rejectUnsupported(front)) return 'handled'
                     continue

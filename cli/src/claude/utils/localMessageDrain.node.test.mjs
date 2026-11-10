@@ -232,19 +232,19 @@ test('按键：Ctrl+S首、Ctrl+J换行、UTF16代理对、Enter末，无恢复�
  assert.equal(encodeInputRecords(records).length,records.length*20);
  assert.deepEqual(decodeInputRecords(encodeInputRecords(records)),records);
 });
-test('Windows 本地：斜杠和 $ 不切换并提示，后面的普通文字照送',async()=>{
+test('Windows 本地：斜杠照送，$ 拒绝，后面的普通文字照送',async()=>{
  const h=fixture();
  h.queue.reset();
  h.queue.push('/compact',mode,'slash');
  h.queue.push('$skill',mode,'dollar');
  h.queue.push('普通文字',mode,'plain');
  assert.equal(await h.drain(),'handled');
- assert.deepEqual(h.consumed,['plain']);
- assert.equal(h.writes.length,2);
- assert.match(h.events[0],/\[local-console slash\].*请在电脑上发/);
+ assert.deepEqual(h.consumed,['slash','plain']);
+ assert.equal(h.writes.length,4);
+ assert.match(h.events[0],/\[local-console dollar\].*请在电脑上发/);
  assert.match(h.events[0],/窗口未重开/);
- assert.match(h.events[1],/\[local-console dollar\].*请在电脑上发/);
- assert.equal(h.queue.cancelByLocalId('slash'),false);
+ assert.equal(h.events.length,1);
+ assert.equal(h.queue.cancelByLocalId('slash'),'consumed');
  assert.equal(h.queue.cancelByLocalId('dollar'),false);
  assert.equal(h.queue.cancelByLocalId('plain'),'consumed');
 });
@@ -283,16 +283,27 @@ test('Windows 本地：无 localId 的 internal 取出且不切换，后面的�
  assert.match(h.events[0],/窗口未重开/);
  assert.equal(h.queue.size(),0);
 });
-test('Windows 本地：未就绪时斜杠命令也不等待、不切换',async()=>{
+test('Windows 本地：未就绪时斜杠命令等待并保留',async()=>{
  const h=fixture();
  h.ready(false);
  h.queue.reset();
  h.queue.push('  /exit',mode,'slash');
  assert.equal(await h.drain(),'handled');
- assert.equal(h.now(),0);
+ assert.equal(h.now(),100);
  assert.equal(h.writes.length,0);
- assert.equal(h.queue.size(),0);
+ assert.equal(h.queue.size(),1);
  assert.match(h.events[0],/\[local-console slash\]/);
+});
+
+for (const text of ['/closeout','/do 上线','  /compact']) test('slash delivery '+text,async()=>{
+ const h=fixture();h.queue.reset();h.queue.push(text,mode,'slash');await h.drain();
+ assert.ok(h.writes.every(n=>n>0));assert.equal(h.writes.length,2);
+ assert.deepEqual(h.echoes,[{text,ids:['slash'],writes:0}]);
+ assert.deepEqual(h.consumed,['slash']);assert.equal(h.queue.size(),0);
+});
+test('non-Windows slash retains switch',async()=>{
+ const h=fixture({options:{platform:'linux'}});h.queue.reset();h.queue.push('/closeout',mode,'slash');
+ assert.equal(await h.drain(),'switch');assert.equal(h.queue.size(),1);assert.equal(h.writes.length,0);
 });
 test('非 Windows：附件仍返回切换，不取出、不提示',async()=>{
  const h=fixture({options:{platform:'linux'}});
