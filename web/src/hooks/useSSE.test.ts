@@ -495,3 +495,231 @@ describe('useSSE user-activity ordering', () => {
         unmount()
     })
 })
+
+function watchFullTableRefetch(queryClient: QueryClient, rows: SessionSummary[]) {
+    const keys: unknown[] = []
+    vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
+        const key = filters?.queryKey
+        keys.push(key)
+        if (Array.isArray(key) && key.length === 1 && key[0] === 'sessions') {
+            queryClient.setQueryData(queryKeys.sessions, {
+                sessions: rows.map((row) => ({ ...row }))
+            })
+        }
+        return Promise.resolve()
+    })
+    return {
+        fullTableCalls() {
+            return keys.filter((key) => Array.isArray(key) && key.length === 1 && key[0] === 'sessions').length
+        }
+    }
+}
+
+function renderGlobalList() {
+    const queryClient = new QueryClient()
+    const wrapper = ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client: queryClient }, children)
+    const hook = renderHook((sessionId?: string) => useSSE({
+        enabled: true,
+        token: 'test-token',
+        baseUrl: 'http://hub.test',
+        scope: 'global',
+        subscription: { all: true, sessionId },
+        onEvent: () => {}
+    }), { wrapper, initialProps: undefined as string | undefined })
+    return { ...hook, queryClient }
+}
+
+describe('useSSE restores a removed session when the full list refetch survives teardown', () => {
+    beforeEach(() => {
+        FakeEventSource.instances = []
+        vi.stubGlobal('EventSource', FakeEventSource)
+        vi.useFakeTimers()
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        vi.unstubAllGlobals()
+    })
+
+    it('refetches the full list when the hook unmounts within 16ms of session-removed', () => {
+        const keep = makeSummary({ id: 'keep' })
+        const gone = makeSummary({ id: 'gone' })
+        const { queryClient, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep, gone] })
+        const watched = watchFullTableRefetch(queryClient, [keep, gone])
+        const readIds = () => queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!.sessions.map((item) => item.id)
+
+        act(() => {
+            FakeEventSource.instances[0]?.simulateMessage({ type: 'session-removed', sessionId: 'gone' })
+        })
+        expect(readIds()).toEqual(['keep'])
+        act(() => { unmount() })
+        expect(watched.fullTableCalls()).toBe(1)
+        expect(readIds()).toEqual(['keep', 'gone'])
+    })
+
+    it('does not invent a missing row from a later patch, and still refetches when the connection is reopened within 16ms', () => {
+        const keep = makeSummary({ id: 'keep' })
+        const gone = makeSummary({ id: 'gone' })
+        const { queryClient, rerender, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep, gone] })
+        const watched = watchFullTableRefetch(queryClient, [keep, gone])
+        const readIds = () => queryClient.getQueryData<{ sessions: SessionSummary[] }>(queryKeys.sessions)!.sessions.map((item) => item.id)
+
+        act(() => {
+            FakeEventSource.instances[0]?.simulateMessage({ type: 'session-removed', sessionId: 'gone' })
+        })
+        act(() => {
+            FakeEventSource.instances[0]?.simulateMessage({
+                type: 'session-updated',
+                sessionId: 'gone',
+                data: { updatedAt: 3_000, active: true }
+            })
+        })
+        expect(readIds()).toEqual(['keep'])
+        act(() => { rerender('reopen') })
+        expect(watched.fullTableCalls()).toBe(1)
+        expect(readIds()).toEqual(['keep', 'gone'])
+        unmount()
+    })
+
+    it('does not refetch the full list for an ordinary new message', () => {
+        const keep = makeSummary({ id: 'keep' })
+        const { queryClient, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep] })
+        const watched = watchFullTableRefetch(queryClient, [keep])
+
+        act(() => {
+            FakeEventSource.instances[0]?.simulateMessage({
+                type: 'message-received',
+                sessionId: 'keep',
+                message: {
+                    id: 'm1',
+                    seq: 1,
+                    localId: null,
+                    content: { type: 'user', text: 'hi' },
+                    createdAt: 10,
+                    scheduledAt: null
+                }
+            })
+        })
+        act(() => { vi.advanceTimersByTime(16) })
+        expect(watched.fullTableCalls()).toBe(0)
+        act(() => { unmount() })
+        expect(watched.fullTableCalls()).toBe(0)
+    })
+
+    function watchInvalidations(queryClient: QueryClient, rows: SessionSummary[]) {
+        const keys: unknown[][] = []
+        vi.spyOn(queryClient, 'invalidateQueries').mockImplementation((filters) => {
+            const key = filters?.queryKey
+            if (Array.isArray(key)) {
+                keys.push(key)
+                if (key.length === 1 && key[0] === 'sessions') {
+                    queryClient.setQueryData(queryKeys.sessions, {
+                        sessions: rows.map((row) => ({ ...row }))
+                    })
+                }
+            }
+            return Promise.resolve()
+        })
+        const count = (kind: string) => keys.filter((key) => key[0] === kind).length
+        return {
+            fullTable: () => count('sessions'),
+            detail: () => count('session'),
+            scratch: () => count('scratchlist'),
+            machines: () => count('machines')
+        }
+    }
+
+    function queueMixedRemoval(source: FakeEventSource | undefined) {
+        source?.simulateMessage({ type: 'session-removed', sessionId: 'gone' })
+        source?.simulateMessage({
+            type: 'session-updated',
+            sessionId: 'missing',
+            data: { updatedAt: 3_000, active: true, scratchlistUpdatedAt: 4_000 }
+        })
+        source?.simulateMessage({ type: 'machine-updated', machineId: 'm1' })
+    }
+
+    function expectOnlyFullTableOnce(watched: ReturnType<typeof watchInvalidations>) {
+        expect(watched.fullTable()).toBe(1)
+        expect(watched.detail()).toBe(0)
+        expect(watched.scratch()).toBe(0)
+        expect(watched.machines()).toBe(0)
+    }
+
+    it('drops detail, scratchlist, and machines when a mixed queue is torn down within 16ms', () => {
+        const keep = makeSummary({ id: 'keep' })
+        const gone = makeSummary({ id: 'gone' })
+        const { queryClient, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep, gone] })
+        const watched = watchInvalidations(queryClient, [keep, gone])
+
+        act(() => { queueMixedRemoval(FakeEventSource.instances[0]) })
+        act(() => { unmount() })
+        expectOnlyFullTableOnce(watched)
+        act(() => { vi.advanceTimersByTime(1_000) })
+        expectOnlyFullTableOnce(watched)
+    })
+
+    it('reissues only the queued full table when a transport error reconnects', () => {
+        const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+        const keep = makeSummary({ id: 'keep' })
+        const gone = makeSummary({ id: 'gone' })
+        const { queryClient, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep, gone] })
+        const watched = watchInvalidations(queryClient, [keep, gone])
+
+        act(() => { queueMixedRemoval(FakeEventSource.instances[0]) })
+        act(() => { FakeEventSource.instances[0]?.onerror?.({}) })
+        expectOnlyFullTableOnce(watched)
+        act(() => { vi.advanceTimersByTime(1_000) })
+        expectOnlyFullTableOnce(watched)
+        unmount()
+        randomSpy.mockRestore()
+    })
+
+    it('reissues only the queued full table when a heartbeat timeout reconnects', () => {
+        const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+        const intervalSpy = vi.spyOn(globalThis, 'setInterval')
+        const previousVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+        let visibilityOverridden = false
+        try {
+            Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+            visibilityOverridden = true
+        } catch {
+            visibilityOverridden = false
+        }
+        const keep = makeSummary({ id: 'keep' })
+        const gone = makeSummary({ id: 'gone' })
+        const { queryClient, unmount } = renderGlobalList()
+        queryClient.setQueryData(queryKeys.sessions, { sessions: [keep, gone] })
+        const watched = watchInvalidations(queryClient, [keep, gone])
+        const watchdogCall = intervalSpy.mock.calls.find((item) => item[1] === 10_000)
+        const watchdog = watchdogCall?.[0]
+
+        act(() => { queueMixedRemoval(FakeEventSource.instances[0]) })
+        const dateNow = vi.spyOn(Date, 'now').mockReturnValue(90_000)
+        act(() => {
+            if (typeof watchdog === 'function') {
+                watchdog()
+            }
+        })
+        dateNow.mockRestore()
+        expectOnlyFullTableOnce(watched)
+        act(() => { vi.advanceTimersByTime(1_000) })
+        expectOnlyFullTableOnce(watched)
+
+        if (visibilityOverridden) {
+            if (previousVisibility) {
+                Object.defineProperty(document, 'visibilityState', previousVisibility)
+            } else {
+                Reflect.deleteProperty(document, 'visibilityState')
+            }
+        }
+        intervalSpy.mockRestore()
+        randomSpy.mockRestore()
+        unmount()
+    })
+})
