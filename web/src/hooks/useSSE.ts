@@ -27,6 +27,16 @@ import { applyAgyCatalogAnnouncement } from '@/lib/agyCatalogAnnouncement'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, markMessagesIndeterminate, markMessagesDispatching, markMessagesRequeued, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 import { applySessionDetailPatch } from '@/lib/sessionPatch'
 import { deliverListedSessionPatch, deliverListedSessionUpsert } from '@/lib/listOnlineFreshness'
+import {
+    applySessionRemovedToList,
+    createInvalidationBatch,
+    missingRowPatchLeavesList,
+    ordinaryMessageQueuesFullTable,
+    reconnectTeardownReleasesQueuedFullTable,
+    SESSION_LIST_REFETCH_BATCH_MS,
+    sessionRemovedQueuesFullTable,
+    summaryPatchMissesRow
+} from './sessionListRefetch'
 
 // Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
 // with the fixture generator); re-exported here so hook consumers and existing
@@ -102,7 +112,6 @@ const RECONNECT_JITTER_MS = 500
 // the relay, so widen the ceiling once the fast retries have clearly failed.
 const RECONNECT_SLOW_AFTER_ATTEMPTS = 8
 const RECONNECT_SLOW_MAX_DELAY_MS = 300_000
-const INVALIDATION_BATCH_MS = 16
 
 function isSessionRecord(value: unknown): value is Session {
     return SessionSchema.safeParse(value).success
@@ -259,13 +268,7 @@ export function useSSE(options: {
     const onErrorRef = useRef(options.onError)
     const onToastRef = useRef(options.onToast)
     const eventSourceRef = useRef<EventSource | null>(null)
-    const invalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-    const pendingInvalidationsRef = useRef<{
-        sessions: boolean
-        machines: boolean
-        sessionIds: Set<string>
-        scratchlistSessionIds: Set<string>
-    }>({ sessions: false, machines: false, sessionIds: new Set(), scratchlistSessionIds: new Set() })
+    const invalidationBatchRef = useRef<ReturnType<typeof createInvalidationBatch> | null>(null)
     const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const reconnectAttemptRef = useRef(0)
     // Set when a reconnect was due while the tab was hidden. Hidden tabs do
@@ -312,14 +315,8 @@ export function useSSE(options: {
         if (!options.enabled) {
             eventSourceRef.current?.close()
             eventSourceRef.current = null
-            if (invalidationTimerRef.current) {
-                clearTimeout(invalidationTimerRef.current)
-                invalidationTimerRef.current = null
-            }
-            pendingInvalidationsRef.current.sessions = false
-            pendingInvalidationsRef.current.machines = false
-            pendingInvalidationsRef.current.sessionIds.clear()
-            pendingInvalidationsRef.current.scratchlistSessionIds.clear()
+            invalidationBatchRef.current?.dispose()
+            invalidationBatchRef.current = null
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
@@ -385,9 +382,33 @@ export function useSSE(options: {
             onDisconnectRef.current?.(reason)
         }
 
+        const batch = createInvalidationBatch({
+            batchMs: SESSION_LIST_REFETCH_BATCH_MS,
+            schedule(delayMs, run) {
+                const handle = setTimeout(run, delayMs)
+                return { cancel() { clearTimeout(handle) } }
+            },
+            invalidateSessions() {
+                return queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+            },
+            invalidateSession(sessionId) {
+                return queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) })
+            },
+            invalidateScratchlist(sessionId) {
+                return queryClient.invalidateQueries({ queryKey: queryKeys.scratchlist(sessionId) })
+            },
+            invalidateMachines() {
+                return queryClient.invalidateQueries({ queryKey: queryKeys.machines })
+            }
+        })
+        invalidationBatchRef.current = batch
+
         const requestReconnect = (reason: string, force = false) => {
             if (reconnectRequested && !force) {
                 return
+            }
+            if (reconnectTeardownReleasesQueuedFullTable(reason)) {
+                batch.releaseQueuedFullTableOnly()
             }
             reconnectRequested = true
             notifyDisconnect(reason)
@@ -399,75 +420,20 @@ export function useSSE(options: {
             scheduleReconnect()
         }
 
-        const flushInvalidations = () => {
-            const pending = pendingInvalidationsRef.current
-            if (
-                !pending.sessions
-                && !pending.machines
-                && pending.sessionIds.size === 0
-                && pending.scratchlistSessionIds.size === 0
-            ) {
-                return
-            }
-
-            const shouldInvalidateSessions = pending.sessions
-            const shouldInvalidateMachines = pending.machines
-            const sessionIds = Array.from(pending.sessionIds)
-            const scratchlistSessionIds = Array.from(pending.scratchlistSessionIds)
-
-            pending.sessions = false
-            pending.machines = false
-            pending.sessionIds.clear()
-            pending.scratchlistSessionIds.clear()
-
-            const tasks: Array<Promise<unknown>> = []
-            if (shouldInvalidateSessions) {
-                tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.sessions }))
-            }
-            for (const sessionId of sessionIds) {
-                tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) }))
-            }
-            for (const sessionId of scratchlistSessionIds) {
-                tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.scratchlist(sessionId) }))
-            }
-            if (shouldInvalidateMachines) {
-                tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.machines }))
-            }
-
-            if (tasks.length === 0) {
-                return
-            }
-            void Promise.all(tasks).catch(() => {})
-        }
-
-        const scheduleInvalidationFlush = () => {
-            if (invalidationTimerRef.current) {
-                return
-            }
-            invalidationTimerRef.current = setTimeout(() => {
-                invalidationTimerRef.current = null
-                flushInvalidations()
-            }, INVALIDATION_BATCH_MS)
-        }
-
         const queueSessionListInvalidation = () => {
-            pendingInvalidationsRef.current.sessions = true
-            scheduleInvalidationFlush()
+            batch.queueSessions()
         }
 
         const queueSessionDetailInvalidation = (sessionId: string) => {
-            pendingInvalidationsRef.current.sessionIds.add(sessionId)
-            scheduleInvalidationFlush()
+            batch.queueSession(sessionId)
         }
 
         const queueScratchlistInvalidation = (sessionId: string) => {
-            pendingInvalidationsRef.current.scratchlistSessionIds.add(sessionId)
-            scheduleInvalidationFlush()
+            batch.queueScratchlist(sessionId)
         }
 
         const queueMachinesInvalidation = () => {
-            pendingInvalidationsRef.current.machines = true
-            scheduleInvalidationFlush()
+            batch.queueMachines()
         }
 
         const upsertSessionSummary = (session: Session) => {
@@ -513,10 +479,10 @@ export function useSSE(options: {
                 }
 
                 const nextSessions = previous.sessions.slice()
-                const index = nextSessions.findIndex((item) => item.id === sessionId)
-                if (index < 0) {
-                    return previous
+                if (summaryPatchMissesRow(nextSessions, sessionId)) {
+                    return missingRowPatchLeavesList(previous)
                 }
+                const index = nextSessions.findIndex((item) => item.id === sessionId)
 
                 const current = nextSessions[index]
                 if (!current) {
@@ -606,7 +572,7 @@ export function useSSE(options: {
                 if (!previous) {
                     return previous
                 }
-                const nextSessions = previous.sessions.filter((item) => item.id !== sessionId)
+                const nextSessions = applySessionRemovedToList(previous.sessions, sessionId)
                 if (nextSessions.length === previous.sessions.length) {
                     return previous
                 }
@@ -686,7 +652,7 @@ export function useSSE(options: {
             }
 
             if (scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(event.type)) {
-                if (event.type === 'message-received' && event.message.scheduledAt != null) {
+                if (event.type === 'message-received' && (event.message.scheduledAt != null || ordinaryMessageQueuesFullTable())) {
                     queueSessionListInvalidation()
                 }
                 if (
@@ -747,6 +713,9 @@ export function useSSE(options: {
             if (event.type === 'session-added' || event.type === 'session-updated' || event.type === 'session-removed') {
                 if (event.type === 'session-removed') {
                     removeSessionSummary(event.sessionId)
+                    if (sessionRemovedQueuesFullTable()) {
+                        queueSessionListInvalidation()
+                    }
                     void queryClient.removeQueries({ queryKey: queryKeys.session(event.sessionId) })
                     clearMessageWindow(event.sessionId)
                 } else if (isSessionRecord(event.data) && event.data.id === event.sessionId) {
@@ -923,13 +892,8 @@ export function useSSE(options: {
             clearInterval(watchdogTimer)
             clearTimeout(connectDeadlineTimer)
             document.removeEventListener('visibilitychange', onVisibilityChange)
-            if (invalidationTimerRef.current) {
-                clearTimeout(invalidationTimerRef.current)
-                invalidationTimerRef.current = null
-            }
-            pendingInvalidationsRef.current.sessions = false
-            pendingInvalidationsRef.current.machines = false
-            pendingInvalidationsRef.current.sessionIds.clear()
+            invalidationBatchRef.current?.dispose()
+            invalidationBatchRef.current = null
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
