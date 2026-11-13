@@ -36,6 +36,7 @@ import type {
     UserMessage
 } from './types'
 import { AgentStateSchema, CliMessagesResponseSchema, MetadataSchema, UserMessageSchema } from './types'
+import { commitAgentStateUpdate } from '@/agent/phoneListFourState'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
 import { isPendingHubPromptEcho } from '../claude/utils/pendingHubPromptEcho'
 import { registerCommonHandlers } from '../modules/common/registerCommonHandlers'
@@ -548,6 +549,10 @@ export class ApiSessionClient extends EventEmitter {
 
     getMetadata(): Readonly<Metadata> | null {
         return this.metadata
+    }
+
+    getAgentState(): Readonly<AgentState> | null {
+        return this.agentState
     }
 
     isPending(): boolean {
@@ -1492,7 +1497,10 @@ export class ApiSessionClient extends EventEmitter {
         if (this.state !== 'active') {
             if (this.state === 'closed') return
             const current = this.agentState ?? ({} as AgentState)
-            this.agentState = handler(current)
+            const updated = handler(current)
+            const committed = commitAgentStateUpdate(current, updated)
+            if (!committed.send) return
+            this.agentState = committed.state
             if (this.state === 'materializing') {
                 this.agentStateChangedDuringAttempt = true
             }
@@ -1502,11 +1510,15 @@ export class ApiSessionClient extends EventEmitter {
             await backoff(async () => {
                 const current = this.agentState ?? ({} as AgentState)
                 const updated = handler(current)
+                const committed = commitAgentStateUpdate(current, updated)
+                if (!committed.send) {
+                    return
+                }
 
                 const answer = await this.socket.emitWithAck('update-state', {
                     sid: this.sessionId,
                     expectedVersion: this.agentStateVersion,
-                    agentState: updated
+                    agentState: committed.state
                 }) as unknown
 
                 applyVersionedAck(answer, {

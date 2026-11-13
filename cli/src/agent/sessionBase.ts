@@ -1,6 +1,7 @@
 import { ApiClient, ApiSessionClient } from '@/lib';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type {
+    AgentState,
     Metadata,
     SessionCollaborationMode,
     SessionEffort,
@@ -9,6 +10,7 @@ import type {
     SessionPermissionMode
 } from '@/api/types';
 import { logger } from '@/ui/logger';
+import { enqueueThinkingClearsLastError } from './phoneListFourState';
 
 export type AgentSessionBaseOptions<Mode> = {
     api: ApiClient;
@@ -87,6 +89,10 @@ export class AgentSessionBase<Mode> {
 
     onThinkingChange = (thinking: boolean) => {
         this.thinking = thinking;
+        enqueueThinkingClearsLastError<AgentState>(
+            thinking,
+            (handler) => this.client.updateAgentState(handler)
+        );
         this.client.keepAlive(thinking, this.mode, this.getKeepAliveRuntime());
     };
 

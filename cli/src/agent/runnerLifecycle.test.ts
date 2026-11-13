@@ -20,6 +20,8 @@ function createMockApiSession() {
         sendSessionDeath: vi.fn(),
         flush: vi.fn(),
         close: vi.fn(),
+        getAgentState: vi.fn(() => null),
+        updateAgentState: vi.fn(),
     } as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'];
 }
 
@@ -34,6 +36,8 @@ function createMockApiSessionWithMetadataCapture() {
         sendSessionDeath: vi.fn(),
         flush: vi.fn(async () => {}),
         close: vi.fn(async () => {}),
+        getAgentState: vi.fn(() => null),
+        updateAgentState: vi.fn(),
         metadataWrites
     } as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'] & {
         metadataWrites: Array<Record<string, unknown>>
@@ -101,13 +105,13 @@ describe('createRunnerLifecycle', () => {
             expect(session.sendSessionDeath).toHaveBeenCalledWith('completed');
         });
 
-        it('limits the final connected flush budget to one second', async () => {
+        it('limits the final connected flush budget to two seconds', async () => {
             const session = createMockApiSession();
             const lc = createRunnerLifecycle({ session, logTag: 'test' });
 
             await lc.cleanup();
 
-            expect(session.flush).toHaveBeenCalledWith({ timeoutMs: 1_000 });
+            expect(session.flush).toHaveBeenCalledWith({ timeoutMs: 2_000 });
         });
 
         it('keeps the socket open when confirmed cleanup times out and closes only after a retry is acknowledged', async () => {
@@ -219,5 +223,90 @@ describe('createRunnerLifecycle archiveReason defaults (tiann/hapi#914)', () => 
         expect(session.metadataWrites[0]).toMatchObject({
             archiveReason: 'User terminated'
         })
+    })
+})
+
+function createAgentStateSession(initial: Record<string, unknown> | null) {
+    let agentState = initial
+    let written: Record<string, unknown> | null = null
+    return {
+        updateMetadata: vi.fn((handler: (metadata: Record<string, unknown>) => Record<string, unknown>) => handler({})),
+        sendSessionDeath: vi.fn(),
+        flush: vi.fn(async () => true),
+        close: vi.fn(async () => {}),
+        getAgentState: vi.fn(() => agentState),
+        updateAgentState: vi.fn((handler: (state: Record<string, unknown>) => Record<string, unknown>) => {
+            written = handler(agentState ?? {})
+        }),
+        written: () => written
+    }
+}
+
+describe('createRunnerLifecycle lastError', () => {
+    it('writes process_error when the process ends in error', async () => {
+        const session = createAgentStateSession(null)
+        const lifecycle = createRunnerLifecycle({
+            session: session as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'],
+            logTag: 'test'
+        })
+
+        lifecycle.markCrash(new Error('boom'))
+        await lifecycle.cleanup()
+
+        expect(session.written()?.lastError).toMatchObject({
+            kind: 'process_error',
+            message: 'Session crashed'
+        })
+    })
+
+    it('clears an old lastError when the process ends normally', async () => {
+        const session = createAgentStateSession({
+            lastError: { kind: 'turn_error', message: 'old', occurredAt: 1 }
+        })
+        const lifecycle = createRunnerLifecycle({
+            session: session as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'],
+            logTag: 'test'
+        })
+
+        lifecycle.setSessionEndReason('completed')
+        await lifecycle.cleanup()
+
+        expect(session.written()?.lastError).toBeNull()
+    })
+
+    it('enqueues a normal end when lastError is empty and the handler keeps the same object', async () => {
+        const session = createAgentStateSession(null)
+        const lifecycle = createRunnerLifecycle({
+            session: session as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'],
+            logTag: 'test'
+        })
+
+        await lifecycle.cleanup()
+
+        expect(session.updateAgentState).toHaveBeenCalledTimes(1)
+        const current = {}
+        const handler = session.updateAgentState.mock.calls[0][0] as (
+            state: Record<string, unknown>
+        ) => Record<string, unknown>
+        expect(handler(current)).toBe(current)
+    })
+
+    it('writes process_error on confirmed cleanup after a crash', async () => {
+        const session = createAgentStateSession({
+            lastError: { kind: 'turn_error', message: 'old', occurredAt: 1 }
+        })
+        const lifecycle = createRunnerLifecycle({
+            session: session as unknown as Parameters<typeof createRunnerLifecycle>[0]['session'],
+            logTag: 'test'
+        })
+
+        lifecycle.markCrash(new Error('boom'))
+        await lifecycle.cleanupConfirmed()
+
+        expect(session.written()?.lastError).toMatchObject({
+            kind: 'process_error',
+            message: 'Session crashed'
+        })
+        expect(session.updateAgentState).toHaveBeenCalledTimes(1)
     })
 })
