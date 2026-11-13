@@ -1,6 +1,7 @@
 import { ApiClient, ApiSessionClient } from '@/lib';
 import { MessageQueue2 } from '@/utils/MessageQueue2';
 import type {
+    AgentState,
     Metadata,
     SessionCollaborationMode,
     SessionEffort,
@@ -9,6 +10,7 @@ import type {
     SessionPermissionMode
 } from '@/api/types';
 import { logger } from '@/ui/logger';
+import { enqueueThinkingClearsLastError } from './phoneListFourState';
 
 export type AgentSessionBaseOptions<Mode> = {
     api: ApiClient;
@@ -86,7 +88,16 @@ export class AgentSessionBase<Mode> {
     }
 
     onThinkingChange = (thinking: boolean) => {
+        const becameTrue = thinking === true && this.thinking !== true;
         this.thinking = thinking;
+        // Fake clients in existing launcher tests have no updateAgentState.
+        // Only a real function may be called, and only when thinking turns on.
+        if (becameTrue && typeof this.client.updateAgentState === 'function') {
+            enqueueThinkingClearsLastError<AgentState>(
+                true,
+                (handler) => this.client.updateAgentState(handler)
+            );
+        }
         this.client.keepAlive(thinking, this.mode, this.getKeepAliveRuntime());
     };
 

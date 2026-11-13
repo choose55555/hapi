@@ -254,7 +254,12 @@ export const AgentStateSchema = z.object({
     // otherwise (a reopened PTY session would silently fall back to 'remote').
     startingMode: z.enum(['local', 'remote', 'pty']).nullish(),
     requests: z.record(z.string(), AgentStateRequestSchema).nullish(),
-    completedRequests: z.record(z.string(), AgentStateCompletedRequestSchema).nullish()
+    completedRequests: z.record(z.string(), AgentStateCompletedRequestSchema).nullish(),
+    lastError: z.object({
+        kind: z.enum(['turn_error', 'process_error']),
+        message: z.string(),
+        occurredAt: z.number()
+    }).nullish()
 })
 
 export type AgentState = z.infer<typeof AgentStateSchema>

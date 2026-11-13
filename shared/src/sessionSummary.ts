@@ -3,6 +3,9 @@ import type { SessionReadState } from './sessionReadState'
 import type { ConversationHistoryCapabilities } from './conversationHistory'
 import { isKnownFlavor } from './flavors'
 import type { AgentFlavor } from './modes'
+import { applyAgentStateLastErrorPatch, applySummaryLastError, sameLastError, summaryLastError } from './phoneListLastError'
+
+export { applyAgentStateLastErrorPatch, applySummaryLastError, sameLastError, summaryLastError }
 
 export type ForkSessionSummary = {
     text: string
@@ -107,6 +110,11 @@ export type SessionSummary = {
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
+    lastError?: {
+        kind: 'turn_error' | 'process_error'
+        message: string
+        occurredAt: number
+    } | null
 }
 
 // Re-exported as a standalone derivation so SSE patch handlers can recompute
@@ -267,6 +275,7 @@ export function toSessionSummary(session: Session): SessionSummary {
         nextScheduledAt: null,
         model: session.model,
         modelReasoningEffort: session.modelReasoningEffort,
-        effort: session.effort
+        effort: session.effort,
+        lastError: summaryLastError(session.agentState)
     }
 }

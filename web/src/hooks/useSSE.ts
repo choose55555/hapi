@@ -7,7 +7,9 @@ import {
     computePendingRequests,
     computePendingRequestsCount,
     computeTodoProgress,
+    applyAgentStateLastErrorPatch,
     isObject,
+    sameLastError,
     toSessionSummary,
     toSessionSummaryMetadata
 } from '@hapi/protocol'
@@ -180,6 +182,7 @@ export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSu
                 && req.kind === nextReq.kind
                 && req.tool === nextReq.tool
         })
+        && sameLastError(current.lastError, next.lastError)
         && sameSessionSummaryMetadata(current.metadata, next.metadata)
         && current.metadataVersion === next.metadataVersion
         && current.agentStateVersion === next.agentStateVersion
@@ -526,6 +529,7 @@ export function useSSE(options: {
                     nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value)
                     nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value)
                     nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt)
+                    nextSummary.lastError = applyAgentStateLastErrorPatch(nextSummary, patch.agentState).lastError
                     nextSummary.agentStateVersion = patch.agentState.version
                 }
                 if (patch.metadata !== undefined && patch.metadata.version >= current.metadataVersion) {

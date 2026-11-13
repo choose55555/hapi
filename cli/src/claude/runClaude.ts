@@ -1,5 +1,6 @@
 import { assertWorkbenchPermissionChangeAllowed, workbenchEnabled, PERMISSION_LOCK_MESSAGE } from './utils/workbench';
 import { logger } from '@/ui/logger';
+import { enqueueLocalHookLastError, enqueueRemoteUserMessageClearsLastError } from '@/agent/phoneListFourState';
 import { loop } from '@/claude/loop';
 import { AgentState, SessionEffort, SessionModel } from '@/api/types';
 import { claudeProcessModeKey, EnhancedMode, PermissionMode } from './loop';
@@ -225,6 +226,13 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                         }
                     }).catch(() => undefined);
                 }
+                if (typeof session.updateAgentState === 'function') {
+                    enqueueLocalHookLastError<AgentState>(
+                        event ?? '',
+                        (handler) => session.updateAgentState(handler),
+                        Date.now()
+                    );
+                }
                 const thinking = event === 'UserPromptSubmit' || event === 'PreToolUse' ? true
                     : event === 'Stop' || event === 'StopFailure' || event === 'SessionEnd' ? false
                     : currentSession.thinking;
@@ -362,6 +370,11 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     const deferredMessages: UserMessageArgs[] = [];
     let messagePipelineReady = false;
     const handleUserMessage: UserMessageHandler = (message, localId) => {
+        if (typeof session.updateAgentState === 'function') {
+            enqueueRemoteUserMessageClearsLastError<AgentState>(
+                (handler) => session.updateAgentState(handler)
+            );
+        }
         const sessionPermissionMode = currentSessionRef.current?.getPermissionMode();
         if (sessionPermissionMode && isPermissionModeAllowedForFlavor(sessionPermissionMode, 'claude')) {
             currentPermissionMode = sessionPermissionMode as PermissionMode;
