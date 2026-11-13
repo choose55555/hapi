@@ -432,6 +432,26 @@ describe('session list search helpers', () => {
 })
 
 describe('getVisibleSessionPreview', () => {
+    it('keeps the ninth read online session after leaving it', () => {
+        const sessions = Array.from({ length: 12 }, (_, index) => makeSession({
+            id: `online-${index + 1}`, active: true
+        }))
+        expect(getVisibleSessionPreview(sessions, {
+            limit: 8, selectedSessionId: 'online-9', isUnread: () => false
+        })).toEqual(sessions)
+        expect(getVisibleSessionPreview(sessions, {
+            limit: 8, selectedSessionId: null, isUnread: () => false
+        })).toEqual(sessions)
+    })
+
+    it('still hides offline rows beyond eight until expanded', () => {
+        const sessions = Array.from({ length: 12 }, (_, index) => makeSession({
+            id: `offline-${index + 1}`
+        }))
+        expect(getVisibleSessionPreview(sessions, { limit: 8 })).toEqual(sessions.slice(0, 8))
+        expect(getVisibleSessionPreview(sessions, { limit: 8, expanded: true })).toEqual(sessions)
+    })
+
     it('keeps selected and pending sessions inside the collapsed preview without promoting them', () => {
         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
             id: `s-${index + 1}`,
@@ -478,7 +498,7 @@ describe('getVisibleSessionPreview', () => {
         expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3'])
     })
 
-    it('does not exceed the limit just because many sessions are active', () => {
+    it('keeps every active session even beyond the preview limit', () => {
         const sessions = Array.from({ length: 6 }, (_, index) => makeSession({
             id: `s-${index + 1}`,
             active: true,
@@ -488,7 +508,7 @@ describe('getVisibleSessionPreview', () => {
 
         const preview = getVisibleSessionPreview(sessions, { limit: 4 })
 
-        expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3', 's-4'])
+        expect(preview.map(session => session.id)).toEqual(['s-1', 's-2', 's-3', 's-4', 's-5', 's-6'])
     })
 
     it('does not move an already-visible selected session to the top', () => {

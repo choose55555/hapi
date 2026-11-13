@@ -689,7 +689,7 @@ export function getVisibleSessionPreview(
 
     const requiredIds = new Set<string>()
     for (const session of sessions) {
-        if (session.active && session.pendingRequestsCount > 0) requiredIds.add(session.id)
+        if (session.active) requiredIds.add(session.id)
         else if (options.isUnread?.(session)) requiredIds.add(session.id)
     }
     if (options.selectedSessionId && sessions.some(session => session.id === options.selectedSessionId)) {
