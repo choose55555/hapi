@@ -13,6 +13,7 @@ import { useMinuteTick } from '@/hooks/useMinuteTick'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { useTranslation } from '@/lib/use-translation'
 import { getWorktreeSessionLabel } from '@/lib/sessionWorktreeLabel'
+import { sessionRowStatus, sessionRowVisibleText } from './sessionRowFourState'
 
 function BulbIcon(props: { className?: string }) {
     return (
@@ -157,6 +158,25 @@ export function SessionRowSummary(props: {
 
     // Presence lives on the agent icon (pulsing while a turn or background
     // work runs) instead of dimming disconnected rows or adding spinners.
+    const rowStatus = sessionRowStatus({
+        active: s.active,
+        thinking: s.thinking,
+        backgroundTaskCount: s.backgroundTaskCount,
+        pendingRequestsCount: s.pendingRequestsCount,
+        lastError: s.lastError,
+        lifecycleState: s.metadata?.lifecycleState,
+        inRunningSection
+    })
+    const visible = sessionRowVisibleText({
+        active: s.active,
+        thinking: s.thinking,
+        backgroundTaskCount: s.backgroundTaskCount,
+        pendingRequestsCount: s.pendingRequestsCount,
+        lastError: s.lastError,
+        lifecycleState: s.metadata?.lifecycleState,
+        inRunningSection,
+        urgentAttention
+    })
     const isRunning = s.active && s.thinking
     const isBackgroundOnly = s.active && !s.thinking && (s.backgroundTaskCount ?? 0) > 0
     // Unread is a semibold title plus accent time — no dot, so the presence
@@ -164,7 +184,7 @@ export function SessionRowSummary(props: {
     const isUnread = attention?.kind === 'unread'
     const requestKind = urgentAttention
         ? attention.kind as 'permission' | 'input'
-        : s.active && (s.pendingRequestsCount ?? 0) > 0
+        : rowStatus.isWaiting
             ? (s.pendingRequestKinds?.length && !s.pendingRequestKinds.includes('permission') ? 'input' : 'permission')
             : null
     const agentIcon = (
@@ -206,22 +226,39 @@ export function SessionRowSummary(props: {
                                 {attentionLabel}
                             </span>
                         ) : null}
-                        {requestKind && urgentAttention && nestedTooltips && attentionId ? (
-                            <SessionAttentionIndicator
-                                attention={attention}
-                                summary={s}
-                                label={attentionLabel ?? ''}
-                                tooltipId={attentionId}
-                            />
-                        ) : requestKind ? (
+                        {requestKind ? (
                             <span className="inline-flex shrink-0 items-center gap-1 text-[var(--app-badge-warning-text)]">
-                                <SessionRequestIcon
-                                    kind={requestKind}
-                                    label={attentionLabel ?? t('session.item.pending')}
-                                />
-                                {!urgentAttention && !inRunningSection ? (
-                                    <span className="text-[11px] font-medium leading-none">{t('session.item.pending')}</span>
+                                {urgentAttention && nestedTooltips && attentionId ? (
+                                    <SessionAttentionIndicator
+                                        attention={attention}
+                                        summary={s}
+                                        label={attentionLabel ?? ''}
+                                        tooltipId={attentionId}
+                                    />
+                                ) : (
+                                    <SessionRequestIcon
+                                        kind={requestKind}
+                                        label={attentionLabel ?? '等待'}
+                                    />
+                                )}
+                                {visible.text ? (
+                                    <span className="text-[11px] font-medium leading-none">
+                                        {visible.text}
+                                    </span>
                                 ) : null}
+                            </span>
+                        ) : visible.text ? (
+                            <span
+                                className={`shrink-0 text-[11px] font-medium leading-none ${
+                                    rowStatus.tone === 'success'
+                                        ? 'text-[var(--app-badge-success-text)]'
+                                        : rowStatus.tone === 'error'
+                                            ? 'text-[var(--app-badge-error-text)]'
+                                            : 'text-[var(--app-hint)]'
+                                }`}
+                                title={visible.errorTitle}
+                            >
+                                {visible.text}
                             </span>
                         ) : null}
                         {hasScheduleTooltip && nestedTooltips && scheduleId ? (
@@ -251,11 +288,6 @@ export function SessionRowSummary(props: {
                             <span className="flex shrink-0 items-center gap-1 text-[var(--app-hint)]">
                                 <BulbIcon className="h-3 w-3" />
                                 {todoProgress.completed}/{todoProgress.total}
-                            </span>
-                        ) : null}
-                        {!attention && s.active && s.pendingRequestsCount > 0 ? (
-                            <span className="shrink-0 text-[var(--app-badge-warning-text)]">
-                                {t('session.item.pending')} {s.pendingRequestsCount}
                             </span>
                         ) : null}
                         {timeLabel ? (

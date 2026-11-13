@@ -1,7 +1,9 @@
 import type { ApiSessionClient } from '@/api/apiSession'
+import type { AgentState } from '@/api/types'
 import type { SessionEndReason } from '@hapi/protocol'
 import { logger } from '@/ui/logger'
 import { restoreTerminalState } from '@/ui/terminalState'
+import { enqueueEndLastError, ARCHIVE_FLUSH_TIMEOUT_MS } from './phoneListFourState'
 
 type RunnerLifecycleOptions = {
     session: ApiSessionClient
@@ -55,7 +57,17 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
 
     const logPrefix = `[${options.logTag}]`
 
+    const syncEndAgentState = () => {
+        enqueueEndLastError<AgentState>(
+            sessionEndReason,
+            archiveReason,
+            (handler) => options.session.updateAgentState(handler),
+            Date.now()
+        )
+    }
+
     const archiveAndClose = async () => {
+        syncEndAgentState()
         options.session.updateMetadata((currentMetadata) => ({
             ...currentMetadata,
             lifecycleState: 'archived',
@@ -65,7 +77,7 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
         }))
 
         options.session.sendSessionDeath(sessionEndReason)
-        await options.session.flush({ timeoutMs: 1_000 })
+        await options.session.flush({ timeoutMs: ARCHIVE_FLUSH_TIMEOUT_MS })
         await options.session.close()
     }
 
@@ -106,6 +118,7 @@ export function createRunnerLifecycle(options: RunnerLifecycleOptions): RunnerLi
             restoreTerminalState()
             options.stopKeepAlive?.()
             await options.onBeforeClose?.()
+            syncEndAgentState()
             options.session.updateMetadata((currentMetadata) => ({
                 ...currentMetadata,
                 lifecycleState: 'archived',
