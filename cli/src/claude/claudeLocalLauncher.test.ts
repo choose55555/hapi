@@ -17,7 +17,8 @@ vi.mock('./utils/sessionScanner', () => ({
         harness.scannerOnMessage = opts.onMessage
         return {
             cleanup: async () => {},
-            onNewSession: () => {}
+            onNewSession: () => {},
+            endBackgroundTasks: () => {}
         }
     }
 }))

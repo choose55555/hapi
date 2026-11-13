@@ -1,3 +1,4 @@
+import { bindLocalBackgroundTasks } from "./utils/localBackgroundTasks";
 import { claudeLocal } from "./claudeLocal";
 import { Session } from "./session";
 import { createSessionScanner } from "./utils/sessionScanner";
@@ -48,6 +49,8 @@ export async function claudeLocalLauncher(
     const scanner = await createSessionScanner({
         sessionId: session.sessionId,
         workingDirectory: session.path,
+        // Metadata snapshot bypasses chat visibility filtering, just like SDK mode.
+        onBackgroundTasks: (message) => session.client.sendClaudeSessionMessage(message),
         onMessage: (message) => {
             session.localPermissionBridge.onTranscript(message);
             // Esc-interrupted turns fire no Stop hook; Claude Code only
@@ -83,6 +86,8 @@ export async function claudeLocalLauncher(
             toolResultImages.send(session.client, message)
         }
     });
+
+    const unbindBackgroundTasks = bindLocalBackgroundTasks(session, () => scanner.endBackgroundTasks());
 
     const handleSessionFound = (sessionId: string) => {
         scanner.onNewSession(sessionId);
@@ -169,6 +174,7 @@ export async function claudeLocalLauncher(
                     hookSettingsPath: session.localHookSettingsPath,
                 });
             } finally {
+                scanner.endBackgroundTasks();
                 processState = 'exited';
                 abortSignal.removeEventListener('abort', forwardAbort);
                 abortSignal.removeEventListener('abort', session.localPermissionBridge.stop);
@@ -200,5 +206,7 @@ export async function claudeLocalLauncher(
         session.localPermissionBridge.stop();
         session.removeSessionFoundCallback(handleSessionFound);
         await scanner.cleanup();
+        scanner.endBackgroundTasks();
+        unbindBackgroundTasks();
     }
 }

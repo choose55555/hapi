@@ -1,3 +1,4 @@
+import { createLocalBackgroundTasks } from "./localBackgroundTasks";
 import { RawJSONLines, RawJSONLinesSchema } from "../types";
 import { basename, dirname, join } from "node:path";
 import { open, readdir, readFile, stat } from "node:fs/promises";
@@ -20,16 +21,19 @@ export async function createSessionScanner(opts: {
     sessionId: string | null;
     workingDirectory: string;
     onMessage: (message: RawJSONLines) => void;
+    onBackgroundTasks?: (message: RawJSONLines) => void;
 }) {
     const scanner = new ClaudeSessionScanner({
         sessionId: opts.sessionId,
         workingDirectory: opts.workingDirectory,
-        onMessage: opts.onMessage
+        onMessage: opts.onMessage,
+        onBackgroundTasks: opts.onBackgroundTasks
     });
 
     await scanner.start();
 
     return {
+        endBackgroundTasks: () => scanner.endBackgroundTasks(),
         cleanup: async () => {
             await scanner.cleanup();
         },
@@ -43,6 +47,8 @@ export type SessionScanner = ReturnType<typeof createSessionScanner>;
 
 
 class ClaudeSessionScanner extends BaseSessionScanner<RawJSONLines> {
+    private readonly backgroundTasks: ReturnType<typeof createLocalBackgroundTasks>;
+    public endBackgroundTasks(): void { this.backgroundTasks.end(); }
     private readonly projectDir: string;
     private readonly onMessage: (message: RawJSONLines) => void;
     private readonly finishedSessions = new Set<string>();
@@ -54,8 +60,9 @@ class ClaudeSessionScanner extends BaseSessionScanner<RawJSONLines> {
     // Session id → transcript path, once Claude Code has relocated it.
     private readonly sessionFiles = new Map<string, string>();
 
-    constructor(opts: { sessionId: string | null; workingDirectory: string; onMessage: (message: RawJSONLines) => void }) {
+    constructor(opts: { sessionId: string | null; workingDirectory: string; onMessage: (message: RawJSONLines) => void; onBackgroundTasks?: (message: RawJSONLines) => void }) {
         super({ intervalMs: 3000 });
+        this.backgroundTasks = createLocalBackgroundTasks(message => opts.onBackgroundTasks?.(message));
         this.projectDir = getProjectPath(opts.workingDirectory);
         this.onMessage = opts.onMessage;
         this.currentSessionId = opts.sessionId;
@@ -84,19 +91,23 @@ class ClaudeSessionScanner extends BaseSessionScanner<RawJSONLines> {
 
     protected async initialize(): Promise<void> {
         if (!this.currentSessionId) {
+            this.backgroundTasks.publish();
             return;
         }
         const sessionFile = await this.resolveSessionFile(this.currentSessionId);
         const { events, nextCursor } = await readSessionLog(sessionFile, 0);
         logger.debug(`[SESSION_SCANNER] Marking ${events.length} existing messages as processed from session ${this.currentSessionId}`);
+        for (const entry of events) this.backgroundTasks.consume(entry.event, false);
         const keys = events.map((entry) => messageKey(entry.event));
         this.seedProcessedKeys(keys);
         this.setCursor(sessionFile, nextCursor);
         for (const subagentFile of await this.subagentFilePaths(sessionFile)) {
             const existing = await readSessionLog(subagentFile, 0);
+            for (const entry of existing.events) this.backgroundTasks.consume(entry.event, false);
             this.seedProcessedKeys(existing.events.map((entry) => messageKey(entry.event)));
             this.setCursor(subagentFile, existing.nextCursor);
         }
+        this.backgroundTasks.publish();
     }
 
     protected async beforeScan(): Promise<void> {
@@ -152,6 +163,7 @@ class ClaudeSessionScanner extends BaseSessionScanner<RawJSONLines> {
 
     protected async handleFileScan(stats: SessionFileScanStats<RawJSONLines>): Promise<void> {
         for (const message of stats.events) {
+            this.backgroundTasks.consume(message);
             const id = message.type === 'summary' ? message.leafUuid : message.uuid;
             logger.debug(`[SESSION_SCANNER] Sending new message: type=${message.type}, uuid=${id}`);
             this.onMessage(message);

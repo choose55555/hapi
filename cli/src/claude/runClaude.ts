@@ -1,3 +1,4 @@
+import { endLocalBackgroundTasks } from "./utils/localBackgroundTasks";
 import { assertWorkbenchPermissionChangeAllowed, workbenchEnabled, PERMISSION_LOCK_MESSAGE } from './utils/workbench';
 import { logger } from '@/ui/logger';
 import { enqueueLocalHookLastError, enqueueRemoteUserMessageClearsLastError } from '@/agent/phoneListFourState';
@@ -198,6 +199,7 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
             // PreToolUse also covers a turn HAPI attached to mid-flight.
             if (currentSession?.mode === 'local' && sessionId === currentSession.sessionId) {
                 const event = data.hook_event_name;
+                if (event === 'SessionEnd') endLocalBackgroundTasks(currentSession);
                 if (event === 'UserPromptSubmit') {
                     currentSession.localTurnStartedAt = Date.now();
                     const promptSession = currentSession;
