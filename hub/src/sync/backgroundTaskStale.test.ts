@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, spyOn } from 'bun:test'
 import type { Session, SyncEvent } from '@hapi/protocol/types'
 import { Store } from '../store'
 import { SessionCache } from './sessionCache'
@@ -28,15 +28,22 @@ describe('stale background tasks', () => {
         const publisher = { emit: (event: SyncEvent) => { events.push(event) } } as unknown as EventPublisher
         const cache = new SessionCache(store, publisher)
         const previous = process.env.HAPI_BACKGROUND_TASK_STALE_MS
+        const clock = spyOn(Date, 'now')
         try {
             process.env.HAPI_BACKGROUND_TASK_STALE_MS = '3600000'
             const created = cache.getOrCreateSession('stale-background-test', { path: '/tmp/test', host: 'test' }, null, 'default')
             cache.setBackgroundTasks(created.id, [{ id: 'task-1', type: 'command', description: 'test' }])
             const updatedAt = cache.getSession(created.id)!.updatedAt
             const later = Date.now() + 61 * 60000
+            clock.mockReturnValue(later)
             cache.handleSessionAlive({ sid: created.id, time: later })
+            expect(cache.getSession(created.id)!.activeAt).toBe(later)
+            expect(cache.getSession(created.id)!.active).toBe(true)
+            expect(cache.getSession(created.id)!.thinking).toBe(false)
             events.length = 0
             cache.expireInactive(later)
+            expect(cache.getSession(created.id)!.active).toBe(true)
+            expect(cache.getSession(created.id)!.thinking).toBe(false)
             expect(cache.getSession(created.id)!.backgroundTaskCount).toBe(0)
             expect(cache.getSession(created.id)!.backgroundTasks).toEqual([])
             expect(cache.getSession(created.id)!.updatedAt).toBe(updatedAt)
@@ -44,6 +51,7 @@ describe('stale background tasks', () => {
             cache.setBackgroundTasks(created.id, [{ id: 'task-2', type: 'command', description: 'fresh' }])
             expect(cache.getSession(created.id)!.backgroundTaskCount).toBe(1)
         } finally {
+            clock.mockRestore()
             if (previous === undefined) delete process.env.HAPI_BACKGROUND_TASK_STALE_MS
             else process.env.HAPI_BACKGROUND_TASK_STALE_MS = previous
             store.close()

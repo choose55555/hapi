@@ -3,6 +3,7 @@ import type { ApiClient } from '@/api/client'
 import type { AttachmentMetadata } from '@/types/api'
 import { isImageMimeType } from '@/lib/fileAttachments'
 import { randomId } from '@/lib/randomId'
+import { compressImageForUpload } from '@/lib/compressImageForUpload'
 import { getRestoredUploadMetadata } from '@/lib/composer-attachment-drafts'
 import type { AttachmentDraftHandoff } from '@/lib/composer-draft-transfer'
 
@@ -67,9 +68,11 @@ export function createAttachmentAdapter(
             }
 
             const id = restored?.id ?? randomId()
-            const contentType = file.type || 'application/octet-stream'
+            let contentType = file.type || 'application/octet-stream'
 
             try {
+                file = await compressImageForUpload(file)
+                contentType = file.type || 'application/octet-stream'
                 let previewUrl: string | undefined
                 if (isImageMimeType(contentType) && file.size <= MAX_PREVIEW_BYTES) {
                     try {

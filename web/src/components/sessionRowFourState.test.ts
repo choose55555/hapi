@@ -17,6 +17,25 @@ function row(overrides: Partial<Parameters<typeof sessionRowStatus>[0]> = {}) {
 const turnError = { kind: 'turn_error' as const, message: '这一轮失败停止', occurredAt: 1 }
 
 describe('session row four states', () => {
+    it('renders background tasks in the visible text when not thinking', () => {
+        expect(sessionRowVisibleText({
+            active: true,
+            thinking: false,
+            backgroundTaskCount: 2,
+            inRunningSection: false
+        }).text).toBe('后台任务')
+    })
+
+    it('shows running while thinking even when background tasks also exist', () => {
+        expect(row({ thinking: true, backgroundTaskCount: 2 }).titleStatus).toBe('运行')
+        expect(sessionRowVisibleText({
+            active: true,
+            thinking: true,
+            backgroundTaskCount: 2,
+            inRunningSection: false
+        }).text).toBe('运行')
+    })
+
     it('shows waiting ahead of running, error, and idle, without the old pending count', () => {
         expect(row({
             pendingRequestsCount: 2,
