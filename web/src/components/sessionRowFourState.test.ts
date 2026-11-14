@@ -26,7 +26,7 @@ describe('session row four states', () => {
         })).toMatchObject({ titleStatus: '等待 2', tone: 'warning', showTrailingPendingCount: false })
         expect(row({ pendingRequestsCount: 1, thinking: true }).titleStatus).toBe('等待')
         expect(row({ thinking: true, lastError: turnError }).titleStatus).toBe('运行')
-        expect(row({ backgroundTaskCount: 1, lastError: turnError }).titleStatus).toBe('运行')
+        expect(row({ backgroundTaskCount: 1, lastError: turnError })).toMatchObject({ titleStatus: '后台任务', tone: 'hint' })
         expect(row({ active: false, lastError: turnError, lifecycleState: 'archived' })).toMatchObject({
             titleStatus: '出错',
             tone: 'error',

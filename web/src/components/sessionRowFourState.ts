@@ -11,6 +11,7 @@ export type SessionRowStatusInput = {
 export type SessionRowStatus = {
     isWaiting: boolean
     isBusy: boolean
+    isBackgroundOnly: boolean
     hasError: boolean
     isArchived: boolean
     titleStatus: string | null
@@ -36,8 +37,8 @@ export function sessionRowStatus(input: SessionRowStatusInput): SessionRowStatus
             titleStatus = pending > 1 ? `等待 ${pending}` : '等待'
             tone = 'warning'
         } else if (isBusy) {
-            titleStatus = '运行'
-            tone = 'success'
+            titleStatus = isRunning ? '运行' : '后台任务'
+            tone = isRunning ? 'success' : 'hint'
         } else if (hasError) {
             titleStatus = '出错'
             tone = 'error'
@@ -54,6 +55,7 @@ export function sessionRowStatus(input: SessionRowStatusInput): SessionRowStatus
     return {
         isWaiting,
         isBusy,
+        isBackgroundOnly,
         hasError,
         isArchived,
         titleStatus,

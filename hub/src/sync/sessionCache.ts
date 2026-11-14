@@ -1,3 +1,4 @@
+import { resolveBackgroundTaskStaleMs, shouldClearStaleBackgroundTasks } from './backgroundTaskStale'
 import { mergeReadState } from '@hapi/protocol'
 import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
 import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
@@ -910,8 +911,15 @@ export class SessionCache {
         // reconnects. Bounded so a genuinely dead process still expires.
         const thinkingSessionTimeoutMs = 300_000
         const expired: string[] = []
+        const staleMs = resolveBackgroundTaskStaleMs()
 
         for (const session of this.sessions.values()) {
+            if (session.active && shouldClearStaleBackgroundTasks(session, this.getAgentProgressAt(session), now, staleMs)) {
+                session.backgroundTaskCount = 0
+                session.backgroundTasks = []
+                this.publisher.emit({ type: 'session-updated', sessionId: session.id,
+                    data: { backgroundTaskCount: 0, backgroundTasks: [] } satisfies SessionPatch })
+            }
             if (!session.active) continue
             const timeoutMs = session.thinking ? thinkingSessionTimeoutMs : sessionTimeoutMs
             if (now - session.activeAt <= timeoutMs) continue
