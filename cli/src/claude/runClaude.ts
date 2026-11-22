@@ -13,6 +13,7 @@ import { getEnvironmentInfo } from '@/ui/doctor';
 import { startHappyServer, toClaudeAllowedHapiMcpTools } from '@/claude/utils/startHappyServer';
 import { startHookServer } from '@/claude/utils/startHookServer';
 import { createTabNameSyncState, readSelectedWindowsTerminalTabs, syncLocalWindowsTerminalTabName, TAB_RESULT_MAX_AGE_MS, TERMINAL_TAB_NAME_SOURCE, type TabNameSyncState } from './utils/windowsTerminalTabName';
+import { applyFixedSessionNameMetadata, canApplyTerminalTabName, isTerminalTabGuessDisabledFromEnv, resolveFixedSessionNameFromEnv } from './utils/fixedSessionName';
 import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/modules/common/hooks/generateHookSettings';
 import { forwardClaudeAutoCompactionStart } from './utils/autoCompactionHook';
 import { registerKillSessionHandler } from './registerKillSessionHandler';
@@ -219,12 +220,17 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
                         readTabs: () => readSelectedWindowsTerminalTabs({ timeoutMs: TAB_RESULT_MAX_AGE_MS }),
                         currentName: () => promptSession.client.getMetadata()?.name,
                         currentNameSource: () => promptSession.client.getMetadata()?.nameSource,
+                        isTitleLocked: () => !canApplyTerminalTabName(promptSession.client.getMetadata()),
+                        disableTabGuess: isTerminalTabGuessDisabledFromEnv(process.env),
                         applyName: (name) => {
-                            promptSession.client.updateMetadata((metadata) => (
-                                metadata.name === name && metadata.nameSource === TERMINAL_TAB_NAME_SOURCE
+                            promptSession.client.updateMetadata((metadata) => {
+                                if (!canApplyTerminalTabName(metadata)) {
+                                    return metadata;
+                                }
+                                return metadata.name === name && metadata.nameSource === TERMINAL_TAB_NAME_SOURCE
                                     ? metadata
-                                    : { ...metadata, name, nameSource: TERMINAL_TAB_NAME_SOURCE }
-                            ));
+                                    : { ...metadata, name, nameSource: TERMINAL_TAB_NAME_SOURCE };
+                            });
                         }
                     }).catch(() => undefined);
                 }
@@ -309,15 +315,19 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     registerLocalHandoffHandler(session.rpcHandlerManager, lifecycle);
 
     const conversationHistory = toConversationHistoryCapabilities(CLAUDE_CONVERSATION_HISTORY)
-    session.updateMetadata((metadata) => ({
-        ...metadata,
-        path: metadata?.path ?? workingDirectory,
-        host: metadata?.host ?? 'unknown',
-        capabilities: {
-            ...metadata?.capabilities,
-            ...(conversationHistory ? { conversationHistory } : {})
-        }
-    }))
+    const fixedSessionName = resolveFixedSessionNameFromEnv(process.env)
+    session.updateMetadata((metadata) => {
+        const base = {
+            ...metadata,
+            path: metadata?.path ?? workingDirectory,
+            host: metadata?.host ?? 'unknown',
+            capabilities: {
+                ...metadata?.capabilities,
+                ...(conversationHistory ? { conversationHistory } : {})
+            }
+        };
+        return applyFixedSessionNameMetadata(base, fixedSessionName);
+    })
 
     session.rpcHandlerManager.registerHandler(RPC_METHODS.ForkConversation, async (payload: unknown) => {
         if (payload && typeof payload === 'object' && 'messageLocalId' in payload && (payload as { messageLocalId?: unknown }).messageLocalId) {

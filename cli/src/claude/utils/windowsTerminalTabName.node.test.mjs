@@ -24,6 +24,8 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const prompt = '列出这个文件夹里有哪些文件';
+const followUpPrompt = '再核对一下这个文件夹里的文件名';
+const submitted = (text = prompt) => `历史\n❯ ${text}\n● 已经收到并开始核查。\n❯ `;
 
 function harness(overrides = {}) {
     const calls = { read: 0, apply: [] };
@@ -42,6 +44,13 @@ function harness(overrides = {}) {
         ...overrides
     };
     return { input, calls };
+}
+
+async function confirmInitialTabName(input, name = '许疃报告') {
+    assert.equal(await syncLocalWindowsTerminalTabName(input), 'kept');
+    input.prompt = followUpPrompt;
+    input.readTabs = async () => [{ name, text: submitted(followUpPrompt) }];
+    assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
 }
 
 test('fragment skips text shorter than 4 and keeps 24 opening characters', () => {
@@ -77,9 +86,9 @@ test('zero hits, two hits, and program titles do not rename', () => {
     ]), null);
 });
 
-test('a later tab rename replaces the previous session name', async () => {
+test('a confirmed tab name replaces a prior non-terminal session name', async () => {
     const { input, calls } = harness({ currentName: () => '旧名字' });
-    assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
+    await confirmInitialTabName(input);
     assert.deepEqual(calls.apply, ['许疃报告']);
 });
 
@@ -94,7 +103,7 @@ test('the same tab name is not written again once its source is recorded', async
 
 test('a matching tab name without a recorded source is written so later renames cannot cover it', async () => {
     const { input, calls } = harness({ currentName: () => '许疃报告' });
-    assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
+    await confirmInitialTabName(input);
     assert.deepEqual(calls.apply, ['许疃报告']);
 });
 
@@ -118,7 +127,7 @@ test('change_title keeps a terminal tab name, and a later tab sync can still rep
             metadata = { ...metadata, name, nameSource: TERMINAL_TAB_NAME_SOURCE };
         }
     });
-    assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
+    await confirmInitialTabName(input);
     assert.equal(metadata.name, '许疃报告');
     assert.equal(metadata.nameSource, 'terminal-tab');
 
@@ -131,7 +140,8 @@ test('change_title keeps a terminal tab name, and a later tab sync can still rep
     assert.equal(metadata.nameSource, 'terminal-tab');
     assert.equal(metadata.summary.text, '旧摘要');
 
-    input.readTabs = async () => [{ name: '手机遥控', text: `❯ ${prompt}\n● 后面\n❯ ` }];
+    input.prompt = prompt;
+    input.readTabs = async () => [{ name: '手机遥控', text: submitted() }];
     assert.equal(await syncLocalWindowsTerminalTabName(input), 'kept');
     assert.equal(metadata.name, '许疃报告');
     assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
@@ -226,9 +236,7 @@ test('native summary fallback does not replace a tab name', async () => {
     assert.equal(namedOnly.summary, undefined);
 });
 
-const submitted = (text = prompt) => `历史\n❯ ${text}\n● 已经收到并开始核查。\n❯ `;
-
-test('unique opening fragment adopts a name regardless of reply or prompt layout', () => {
+test('matches prompt anchors and ignores generated window names', () => {
     for (const text of [
         submitted(),
         `❯ ${prompt}`,
@@ -243,13 +251,16 @@ test('unique opening fragment adopts a name regardless of reply or prompt layout
     }
     assert.equal(chooseTabName(prompt, [{ name: '片段不全', text: `❯ ${prompt.slice(0, 5)}\n● 回复` }]), null);
     const long = '同一开头'.repeat(10);
-    assert.equal(chooseTabName(long + '甲', [{ name: '乙窗口', text: submitted(long + '乙') }]), '乙窗口');
+    assert.equal(chooseTabName(long + '甲', [{ name: '乙窗口', text: submitted(long + '乙') }]), null);
+    assert.equal(chooseTabName(long + '甲', [{ name: '甲窗口', text: submitted(long + '甲') }]), '甲窗口');
     assert.equal(chooseTabName(prompt, [
         { name: '甲', text: submitted() }, { name: '乙', text: submitted() }
     ]), null);
-    for (const name of ['', '✳ Claude Code', '[Claude] menu', '[Workbench] menu']) {
+    for (const name of ['', '✳ Claude Code', '[Claude] menu', '[Workbench] menu', '⠋ Working',
+        '▶ 推进 | ✳ Claude Code', 'pan2-code-abcd-123', 'qinan-abcd']) {
         assert.equal(chooseTabName(prompt, [{ name, text: submitted() }]), null);
     }
+    assert.equal(chooseTabName(prompt, [{ name: '▶ 推进 | 许疃', text: submitted() }]), '许疃');
 });
 
 test('read deadline starts at submission; 1500ms allowed, 1501ms and clock rollback discarded', async () => {
@@ -257,6 +268,7 @@ test('read deadline starts at submission; 1500ms allowed, 1501ms and clock rollb
     for (const delay of [1500, 1501, 8000, -1, NaN]) {
         let clock = 100;
         const { input, calls } = harness({
+            requireTwoReadsForInitial: false,
             submittedAt: 100, now: () => clock,
             readTabs: async () => { clock += delay; return [{ name: '许疃报告', text: submitted() }]; }
         });
@@ -322,18 +334,30 @@ test('different candidates and changed current metadata cannot share a confirmat
     assert.deepEqual(calls.apply, ['乙']);
 });
 
-test('first sync of an empty name still takes one turn, even if source is terminal-tab', async () => {
+test('first sync of an empty name requires a second distinct prompt', async () => {
     for (const name of [undefined, '', '  ']) {
         const { input, calls } = harness({ currentName: () => name, currentNameSource: () => TERMINAL_TAB_NAME_SOURCE });
-        assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');
+        assert.equal(await syncLocalWindowsTerminalTabName(input), 'kept');
+        assert.equal(await syncLocalWindowsTerminalTabName(input), 'kept');
+        assert.deepEqual(calls.apply, []);
+        await confirmInitialTabName(input);
         assert.deepEqual(calls.apply, ['许疃报告']);
+    }
+});
+
+test('a locked title or disabled guessing skips reading the terminal', async () => {
+    for (const options of [{ isTitleLocked: () => true }, { disableTabGuess: true }, { currentNameSource: () => 'fixed' }]) {
+        const { input, calls } = harness(options);
+        assert.equal(await syncLocalWindowsTerminalTabName(input), 'skipped');
+        assert.equal(calls.read, 0);
+        assert.deepEqual(calls.apply, []);
     }
 });
 
 test('older reads cannot rename after a later turn or metadata update; state is per session', async () => {
     let release;
     const slow = new Promise((resolve) => { release = resolve; });
-    const { input, calls } = harness({ readTabs: () => slow });
+    const { input, calls } = harness({ requireTwoReadsForInitial: false, readTabs: () => slow });
     const old = syncLocalWindowsTerminalTabName(input);
     input.readTabs = async () => [{ name: '正确标签', text: submitted() }];
     assert.equal(await syncLocalWindowsTerminalTabName(input), 'renamed');

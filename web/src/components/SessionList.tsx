@@ -292,6 +292,144 @@ type MachineGroup = {
 
 export const UNKNOWN_MACHINE_ID = '__unknown__'
 export const GROUP_SESSION_PREVIEW_LIMIT = DEFAULT_SESSION_PREVIEW_LIMIT
+export const RECENT_SESSION_GRACE_MS = 60_000
+const RECENT_VISITED_STORAGE_KEY = 'hapi:recent-visited-session:v1'
+
+export type RecentSessionState = { id: string; leftAt: number | null }
+
+let recentVisitedMemoryState: RecentSessionState | null = null
+
+function getRecentVisitedStorage(): Storage | null {
+    if (typeof window === 'undefined') return null
+    try {
+        return window.sessionStorage
+    } catch {
+        return null
+    }
+}
+
+export function readRecentVisitedSession(storage?: Pick<Storage, 'getItem'> | null): RecentSessionState | null {
+    if (recentVisitedMemoryState) return recentVisitedMemoryState
+    const target = storage === undefined ? getRecentVisitedStorage() : storage
+    if (!target) return null
+    try {
+        const raw = target.getItem(RECENT_VISITED_STORAGE_KEY)
+        if (!raw) return null
+        const parsed = JSON.parse(raw) as { id?: unknown; leftAt?: unknown }
+        if (typeof parsed.id !== 'string' || !parsed.id.trim()) return null
+        if (parsed.leftAt !== null && (typeof parsed.leftAt !== 'number' || !Number.isFinite(parsed.leftAt))) {
+            return null
+        }
+        recentVisitedMemoryState = { id: parsed.id.trim(), leftAt: parsed.leftAt }
+        return recentVisitedMemoryState
+    } catch {
+        return null
+    }
+}
+
+function writeRecentVisitedSession(
+    state: RecentSessionState | null,
+    storage?: Pick<Storage, 'setItem' | 'removeItem'> | null
+): void {
+    recentVisitedMemoryState = state
+    const target = storage === undefined ? getRecentVisitedStorage() : storage
+    if (!target) return
+    try {
+        if (state === null) {
+            target.removeItem(RECENT_VISITED_STORAGE_KEY)
+        } else {
+            target.setItem(RECENT_VISITED_STORAGE_KEY, JSON.stringify(state))
+        }
+    } catch {
+        // Ignore storage quota/private-mode errors; memory fallback still protects SPA remounts.
+    }
+}
+
+export function recordSessionEntered(
+    sessionId: string | null | undefined,
+    storage?: Pick<Storage, 'setItem' | 'removeItem'> | null
+): void {
+    const id = sessionId?.trim()
+    if (!id) return
+    writeRecentVisitedSession({ id, leftAt: null }, storage)
+}
+
+export function recordSessionExited(
+    sessionId: string | null | undefined,
+    now = Date.now(),
+    storage?: Pick<Storage, 'setItem' | 'removeItem'> | null
+): RecentSessionState | null {
+    const id = sessionId?.trim()
+    if (!id) return null
+    const state: RecentSessionState = { id, leftAt: now }
+    writeRecentVisitedSession(state, storage)
+    return state
+}
+
+export function clearRecentVisitedSession(storage?: Pick<Storage, 'setItem' | 'removeItem'> | null): void {
+    writeRecentVisitedSession(null, storage)
+}
+
+export function resolveRecentSessionId(
+    state: RecentSessionState | null | undefined,
+    now = Date.now(),
+    graceMs = RECENT_SESSION_GRACE_MS
+): string | null {
+    if (!state || !state.id) return null
+    if (state.leftAt === null) return state.id
+    const age = now - state.leftAt
+    if (!Number.isFinite(age) || age < 0 || age > graceMs) return null
+    return state.id
+}
+
+export function bootstrapRecentSessionOnMount(
+    selectedSessionId: string | null | undefined,
+    now = Date.now(),
+    graceMs = RECENT_SESSION_GRACE_MS,
+    storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | null
+): RecentSessionState | null {
+    if (selectedSessionId) {
+        recordSessionEntered(selectedSessionId, storage)
+        return null
+    }
+    const persisted = readRecentVisitedSession(storage)
+    if (!persisted) return null
+    if (persisted.leftAt === null) {
+        return recordSessionExited(persisted.id, now, storage)
+    }
+    if (resolveRecentSessionId(persisted, now, graceMs)) {
+        return persisted
+    }
+    clearRecentVisitedSession(storage)
+    return null
+}
+
+export function resolveEffectiveRecentSessionId(input: {
+    previousSelectedSessionId: string | null | undefined
+    selectedSessionId: string | null | undefined
+    recentSessionState: RecentSessionState | null | undefined
+    now?: number
+    graceMs?: number
+}): string | null {
+    if (input.selectedSessionId) return null
+    if (input.previousSelectedSessionId) return input.previousSelectedSessionId
+    return resolveRecentSessionId(input.recentSessionState, input.now, input.graceMs)
+}
+
+export function getCollapsedGroupPeekSessions(
+    sessions: readonly SessionSummary[],
+    options: {
+        isUnread: (session: SessionSummary) => boolean
+        selectedSessionId?: string | null
+        recentSessionId?: string | null
+    }
+): SessionSummary[] {
+    return sessions.filter((session) => (
+        options.isUnread(session)
+        || (Boolean(options.selectedSessionId) && session.id === options.selectedSessionId)
+        || (Boolean(options.recentSessionId) && session.id === options.recentSessionId)
+    ))
+}
 
 export function getSessionDedupKey(session: SessionSummary): string | null {
     const agentId = session.metadata?.agentSessionId?.trim()
@@ -301,7 +439,11 @@ export function getSessionDedupKey(session: SessionSummary): string | null {
     return `${session.metadata?.flavor ?? 'unknown'}:${agentId}`
 }
 
-export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
+export function deduplicateSessionsByAgentId(
+    sessions: SessionSummary[],
+    selectedSessionId?: string | null,
+    recentSessionId?: string | null
+): SessionSummary[] {
     const byAgentId = new Map<string, SessionSummary[]>()
     const result: SessionSummary[] = []
 
@@ -326,12 +468,34 @@ export function deduplicateSessionsByAgentId(sessions: SessionSummary[], selecte
             // Among inactive duplicates, keep the selected one visible
             if (a.id === selectedSessionId) return -1
             if (b.id === selectedSessionId) return 1
+            if (recentSessionId) {
+                if (a.id === recentSessionId) return -1
+                if (b.id === recentSessionId) return 1
+            }
             // Preserve an explicit pin when otherwise choosing by recency
             if (Boolean(a.globalPinned) !== Boolean(b.globalPinned)) return a.globalPinned ? -1 : 1
             if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1
             return b.updatedAt - a.updatedAt
         })
-        result.push(group[0])
+        // Keep every active independent hub session; only collapse inactive duplicates.
+        const activeSessions = group.filter(item => item.active)
+        if (activeSessions.length > 0) {
+            const keptIds = new Set<string>()
+            for (const item of activeSessions) {
+                result.push(item)
+                keptIds.add(item.id)
+            }
+            for (const anchorId of [selectedSessionId, recentSessionId]) {
+                if (!anchorId || keptIds.has(anchorId)) continue
+                const anchored = group.find(item => item.id === anchorId)
+                if (anchored) {
+                    result.push(anchored)
+                    keptIds.add(anchored.id)
+                }
+            }
+        } else {
+            result.push(group[0])
+        }
     }
 
     return result
@@ -346,22 +510,39 @@ export function isSidebarEmptySessionStub(session: SessionSummary): boolean {
     return true
 }
 
-export function shouldShowSessionInSidebar(session: SessionSummary, selectedSessionId?: string | null): boolean {
+export function shouldShowSessionInSidebar(
+    session: SessionSummary,
+    selectedSessionId?: string | null,
+    recentSessionId?: string | null
+): boolean {
     if (session.id === selectedSessionId) return true
+    if (recentSessionId && session.id === recentSessionId) return true
     if (session.active || session.pinned || session.globalPinned) return true
     return !isSidebarEmptySessionStub(session)
 }
 
-export function prepareSidebarSessions(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
-    return deduplicateSessionsByAgentId(sessions, selectedSessionId)
-        .filter(session => shouldShowSessionInSidebar(session, selectedSessionId))
+export function prepareSidebarSessions(
+    sessions: SessionSummary[],
+    selectedSessionId?: string | null,
+    recentSessionId?: string | null
+): SessionSummary[] {
+    return deduplicateSessionsByAgentId(sessions, selectedSessionId, recentSessionId)
+        .filter(session => shouldShowSessionInSidebar(session, selectedSessionId, recentSessionId))
 }
 
 // "Active sessions only" view: hide inactive sessions, but never hide the one the
 // operator currently has open — otherwise toggling the filter would yank the
 // selected session out from under them.
-export function filterActiveSessionsOnly(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
-    return sessions.filter(session => session.active || session.id === selectedSessionId)
+export function filterActiveSessionsOnly(
+    sessions: SessionSummary[],
+    selectedSessionId?: string | null,
+    recentSessionId?: string | null
+): SessionSummary[] {
+    return sessions.filter(session => (
+        session.active
+        || session.id === selectedSessionId
+        || (Boolean(recentSessionId) && session.id === recentSessionId)
+    ))
 }
 
 // Paginated session previews move one batch at a time in either direction.
@@ -680,6 +861,7 @@ export function getVisibleSessionPreview(
     options: {
         expanded?: boolean
         selectedSessionId?: string | null
+        recentSessionId?: string | null
         limit?: number
         isUnread?: (session: SessionSummary) => boolean
     } = {}
@@ -694,6 +876,9 @@ export function getVisibleSessionPreview(
     }
     if (options.selectedSessionId && sessions.some(session => session.id === options.selectedSessionId)) {
         requiredIds.add(options.selectedSessionId)
+    }
+    if (options.recentSessionId && sessions.some(session => session.id === options.recentSessionId)) {
+        requiredIds.add(options.recentSessionId)
     }
 
     const visible: SessionSummary[] = sessions.filter((session, index) => {
@@ -1460,17 +1645,75 @@ export function SessionList(props: {
         return t('machine.unknown')
     }
 
+    const prevSelectedSessionIdRef = useRef<string | null>(selectedSessionId ?? null)
+    // Synchronously bootstrap from module/sessionStorage on mount so mobile single-pane
+    // unmount -> remount back-navigation retains the just-exited session on frame 0.
+    const [recentSessionState, setRecentSessionState] = useState<RecentSessionState | null>(() => (
+        bootstrapRecentSessionOnMount(selectedSessionId)
+    ))
+    const handleSelectSession = useCallback(
+        (sessionId: string, targetMessageId?: string, targetMessageQuery?: string) => {
+            recordSessionEntered(sessionId)
+            props.onSelect(sessionId, targetMessageId, targetMessageQuery)
+        },
+        [props.onSelect]
+    )
+    // Compute synchronously during render so BOTH desktop same-instance exit AND
+    // mobile unmount -> remount have zero unprotected frames before useEffect runs.
+    const recentSessionId = resolveEffectiveRecentSessionId({
+        previousSelectedSessionId: prevSelectedSessionIdRef.current,
+        selectedSessionId,
+        recentSessionState
+    })
+    const effectiveAnchorSessionId = selectedSessionId ?? recentSessionId
+    useEffect(() => {
+        const previousId = prevSelectedSessionIdRef.current
+        prevSelectedSessionIdRef.current = selectedSessionId ?? null
+        if (selectedSessionId) {
+            recordSessionEntered(selectedSessionId)
+            setRecentSessionState(null)
+            return
+        }
+        if (previousId) {
+            setRecentSessionState(recordSessionExited(previousId, Date.now()))
+            return
+        }
+        const persisted = readRecentVisitedSession()
+        if (persisted && persisted.leftAt === null) {
+            setRecentSessionState(recordSessionExited(persisted.id, Date.now()))
+        }
+    }, [selectedSessionId])
+    useEffect(() => {
+        if (!recentSessionState || recentSessionState.leftAt === null) return
+        const remainingMs = Math.max(0, RECENT_SESSION_GRACE_MS - (Date.now() - recentSessionState.leftAt))
+        if (remainingMs === 0) {
+            setRecentSessionState(null)
+            clearRecentVisitedSession()
+            return
+        }
+        const targetId = recentSessionState.id
+        const targetLeftAt = recentSessionState.leftAt
+        const timer = setTimeout(() => {
+            setRecentSessionState((current) => (current?.id === targetId && current.leftAt === targetLeftAt ? null : current))
+            const latest = readRecentVisitedSession()
+            if (latest?.id === targetId && latest.leftAt === targetLeftAt) {
+                clearRecentVisitedSession()
+            }
+        }, remainingMs)
+        return () => clearTimeout(timer)
+    }, [recentSessionState])
+
     const sidebarSessions = useMemo(
-        () => prepareSidebarSessions(props.sessions, selectedSessionId),
-        [props.sessions, selectedSessionId]
+        () => prepareSidebarSessions(props.sessions, selectedSessionId, recentSessionId),
+        [props.sessions, selectedSessionId, recentSessionId]
     )
     const readableSessions = useMemo(
-        () => props.sessions.filter(session => shouldShowSessionInSidebar(session, selectedSessionId)),
-        [props.sessions, selectedSessionId]
+        () => props.sessions.filter(session => shouldShowSessionInSidebar(session, selectedSessionId, recentSessionId)),
+        [props.sessions, selectedSessionId, recentSessionId]
     )
     const allSessions = useMemo(
-        () => filterSessionsByStatus(sidebarSessions, listView.status, selectedSessionId),
-        [sidebarSessions, selectedSessionId, listView.status]
+        () => filterSessionsByStatus(sidebarSessions, listView.status, effectiveAnchorSessionId),
+        [sidebarSessions, effectiveAnchorSessionId, listView.status]
     )
     const unreadSessionCount = useMemo(
         () => getUnreadSessionCount(readableSessions),
@@ -1487,8 +1730,8 @@ export function SessionList(props: {
         () => {
             if (contentSearchActive) {
                 const results = contentSearchResponse?.results.map((result) => result.session) ?? []
-                const prepared = prepareSidebarSessions(results, selectedSessionId)
-                return filterSessionsByStatus(prepared, listView.status, selectedSessionId)
+                const prepared = prepareSidebarSessions(results, selectedSessionId, recentSessionId)
+                return filterSessionsByStatus(prepared, listView.status, effectiveAnchorSessionId)
             }
             if (!isFiltering) return allSessions
             const matched = hasTextQuery && searchScoreIndex
@@ -1505,7 +1748,7 @@ export function SessionList(props: {
             }
             return matched
         },
-        [allSessions, contentSearchActive, contentSearchResponse, hasTextQuery, isFiltering, normalizedQuery, searchScoreIndex, selectedSessionId, listView.status, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+        [allSessions, contentSearchActive, contentSearchResponse, hasTextQuery, isFiltering, normalizedQuery, searchScoreIndex, selectedSessionId, recentSessionId, effectiveAnchorSessionId, listView.status, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
     const contentSnippetBySessionId = useMemo(() => {
         const snippets = new Map<string, string>()
@@ -1727,8 +1970,8 @@ export function SessionList(props: {
         // Archived-only would otherwise collapse every group (none has an
         // active session), hiding exactly what was asked for.
         if (listView.status === 'archived') return false
-        const hasSelectedSession = selectedSessionId
-            ? group.sessions.some(session => session.id === selectedSessionId)
+        const hasSelectedSession = effectiveAnchorSessionId
+            ? group.sessions.some(session => session.id === effectiveAnchorSessionId)
             : false
         return !group.hasActiveSession && !group.hasPinnedSession && !hasSelectedSession
     }
@@ -1766,6 +2009,7 @@ export function SessionList(props: {
             )
             const currentVisibleCount = getVisibleSessionPreview(group.sessions, {
                 selectedSessionId,
+                recentSessionId,
                 limit: currentLimit,
                 isUnread: isSessionUnread
             }).length
@@ -1800,6 +2044,7 @@ export function SessionList(props: {
             group.sessions,
             {
                 selectedSessionId,
+                recentSessionId,
                 limit: getGroupVisibleCount(group),
                 isUnread: isSessionUnread
             }
@@ -1871,7 +2116,7 @@ export function SessionList(props: {
                                         <SessionItem
                                             key={s.id}
                                             session={s}
-                                            onSelect={props.onSelect}
+                                            onSelect={handleSelectSession}
                                             showPath={false}
                                             api={api}
                                             titleSuggestionAvailable={titleSuggestionAvailable}
@@ -1937,7 +2182,7 @@ export function SessionList(props: {
     const renderGroupSessionItem = (s: SessionSummary) => (
         <SessionItem
             session={s}
-            onSelect={props.onSelect}
+            onSelect={handleSelectSession}
             showPath={false}
             api={api}
             titleSuggestionAvailable={titleSuggestionAvailable}
@@ -1955,7 +2200,13 @@ export function SessionList(props: {
         const isCollapsed = isGroupCollapsed(group)
         // A collapsed group still shows its unread rows, so new output in a
         // quiet project is never folded out of sight.
-        const collapsedUnreadSessions = isCollapsed ? group.sessions.filter(isSessionUnread) : []
+        const collapsedUnreadSessions = isCollapsed
+            ? getCollapsedGroupPeekSessions(group.sessions, {
+                isUnread: isSessionUnread,
+                selectedSessionId,
+                recentSessionId
+            })
+            : []
         const visibleGroupSessions = getVisibleGroupSessions(group)
         const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
         const currentLimit = Math.min(
@@ -1965,6 +2216,7 @@ export function SessionList(props: {
         const previousLimit = getPreviousSessionVisibleCount(currentLimit, sessionPreviewLimit)
         const previousGroupSessions = getVisibleSessionPreview(group.sessions, {
             selectedSessionId,
+            recentSessionId,
             limit: previousLimit,
             isUnread: isSessionUnread
         })
@@ -2587,7 +2839,7 @@ export function SessionList(props: {
                                         <SessionItem
                                             key={s.id}
                                             session={s}
-                                            onSelect={props.onSelect}
+                                            onSelect={handleSelectSession}
                                             showPath={false}
                                             api={api}
                                             titleSuggestionAvailable={titleSuggestionAvailable}

@@ -3,12 +3,18 @@ import { spawn } from 'node:child_process';
 export const PROMPT_FRAGMENT_MIN = 4;
 export const PROMPT_FRAGMENT_MAX = 24;
 export const TERMINAL_TAB_NAME_SOURCE = 'terminal-tab';
+export const FIXED_SESSION_NAME_SOURCE = 'fixed';
 const TERMINAL_TEXT_CAP = 200_000;
 // Cold start of UI Automation was measured at 3026 ms, so 3 seconds timed out.
 export const READ_TIMEOUT_MS = 8_000;
 export const TAB_RESULT_MAX_AGE_MS = 1_500;
 
-export type TabNameSyncState = { turn: number; pendingName?: string; pendingFromName?: string };
+export type TabNameSyncState = {
+    turn: number;
+    pendingName?: string;
+    pendingFromName?: string;
+    pendingPromptKey?: string;
+};
 export function createTabNameSyncState(): TabNameSyncState {
     return { turn: 0 };
 }
@@ -17,7 +23,39 @@ export type SelectedTab = { name: string; text: string };
 
 export type TabReadResult = { stdout: string; timedOut: boolean; exitCode: number | null };
 
-const PROGRAM_TITLE_PREFIXES = ['✳', '[Claude]', '[Workbench]'] as const;
+const PROGRAM_TITLE_PREFIXES = [
+    '✳',
+    '[Claude]',
+    '[Claude/',
+    '[Codex]',
+    '[Codex/',
+    '[Workbench]',
+    '[Workbench/'
+] as const;
+
+// Claude Code writes native busy titles starting with Braille spinner glyphs
+// (confirmed by scripts/workbench-lib.ps1:1339). Treat them as program titles
+// (REJECT), NEVER strip them into fake user tab names.
+const CLAUDE_BRAILLE_TITLE_PREFIX = /^[\u2800-\u28ff]/u;
+
+// Workbench-owned transient status/spinner prefixes ONLY.
+// CRITICAL (Revision 3 fix per Codex review): NEVER include '✳' (\u2733) or
+// Braille (\u2800-\u28ff) here — those are Claude Code's own program title
+// markers and MUST be rejected by isProgramTitle() before and after stripping.
+const DYNAMIC_TITLE_PREFIX_PATTERNS: readonly RegExp[] = [
+    // Workbench dynamic status prefixes written by scripts/workbench-lib.ps1:1347-1348
+    /^(?:\u25b6\s*推进|\u270b\s*等你|\u2714\s*完成)\s*\|\s*/u,
+    // Historical workbench tab progress spinner glyphs (◐◑◒◓ ONLY)
+    /^[\u25d0\u25d1\u25d2\u25d3]\s*/u
+];
+
+// Covers ALL zones in scripts/doctor_config.json `zones` table (common, xutuan,
+// qinan, tender, indonesia, pan2, qianyingzi, aftersales, digitalhub, qtt,
+// edumedia, chatgpt-archive) plus legacy/alias prefixes and launcher tool codes.
+const GENERATED_WINDOW_LABEL_PATTERNS: readonly RegExp[] = [
+    /^(?:common|xutuan|qinan|tender|indonesia|pan2|qianyingzi|aftersales|digitalhub|qtt|edumedia|chatgpt-archive|lanyan|lanyan-bid|tender-common|zhuxianzhuang|obsidian|obs|zone)-(?:clau|code|codex|agy|anti|kimi|grok|qwen|dsh)-[0-9a-f]{4}-\d+$/i,
+    /^(?:common|xutuan|qinan|tender|indonesia|pan2|qianyingzi|aftersales|digitalhub|qtt|edumedia|chatgpt-archive|lanyan|lanyan-bid|tender-common|zhuxianzhuang|obsidian|obs|zone)-[0-9a-f]{4}$/i
+];
 
 /**
  * PowerShell 5.1 + UIAutomationClient. ASCII only, so -Command does not depend
@@ -72,12 +110,36 @@ export function stripWhitespace(value: string): string {
     return value.replace(/[\s\u00a0\u3000\ufeff]+/g, '');
 }
 
+export function isProgramTitle(value: string): boolean {
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (PROGRAM_TITLE_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+    if (CLAUDE_BRAILLE_TITLE_PREFIX.test(trimmed)) return true;
+    return false;
+}
+
+/**
+ * Strip transient workbench status/spinner prefixes while preserving the real
+ * user-facing tab label behind them (e.g. "▶ 推进 | 许疃" -> "许疃").
+ * Never strips Claude program title prefixes ('✳' or Braille spinners).
+ */
+export function stripDynamicTitlePrefixes(rawName: string): string {
+    let current = rawName.trim();
+    for (let step = 0; step < 8 && current.length > 0; step += 1) {
+        if (isProgramTitle(current)) break;
+        let next = current;
+        for (const pattern of DYNAMIC_TITLE_PREFIX_PATTERNS) {
+            next = next.replace(pattern, '').trim();
+        }
+        if (next === current) break;
+        current = next;
+    }
+    return current;
+}
+
 /**
  * Opening of the prompt after whitespace is removed.
- * Under 4 characters is not judged: short text such as "你好" appears in many
- * terminals and would rename the wrong session. 24 characters is enough to
- * tell ordinary sentences apart, and short enough that line wrapping or a
- * capped terminal buffer still contains the opening the user just submitted.
+ * Kept exported for backward compatibility with existing callers/tests.
  */
 export function promptMatchFragment(prompt: string): string | null {
     const stripped = stripWhitespace(prompt);
@@ -85,20 +147,54 @@ export function promptMatchFragment(prompt: string): string | null {
     return stripped.slice(0, PROMPT_FRAGMENT_MAX);
 }
 
+/**
+ * Stronger prompt anchor(s) for unlocked windows:
+ * For prompts longer than 24 chars, require BOTH the opening 24-char anchor AND
+ * a non-overlapping closing anchor so two windows sharing a common instruction
+ * prefix (e.g. "请帮我核查...甲" vs "请帮我核查...乙") cannot cross-match.
+ */
+export function promptMatchAnchors(prompt: string): { head: string; tail: string | null } | null {
+    const stripped = stripWhitespace(prompt);
+    if (stripped.length < PROMPT_FRAGMENT_MIN) return null;
+    const head = stripped.slice(0, PROMPT_FRAGMENT_MAX);
+    if (stripped.length <= PROMPT_FRAGMENT_MAX) {
+        return { head, tail: null };
+    }
+    const tailLen = Math.min(PROMPT_FRAGMENT_MAX, stripped.length - PROMPT_FRAGMENT_MAX);
+    const tail = stripped.slice(-tailLen);
+    return { head, tail };
+}
+
 export function isUsableTabName(name: string): boolean {
     const trimmed = name.trim();
     if (!trimmed) return false;
-    return !PROGRAM_TITLE_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+    // Reject program titles BEFORE stripping workbench prefixes so '✳ ...' and
+    // Braille auto-titles are never stripped into seemingly usable labels.
+    if (isProgramTitle(trimmed)) return false;
+    const cleaned = stripDynamicTitlePrefixes(trimmed);
+    if (!cleaned) return false;
+    // Also reject program titles AFTER stripping workbench status wrappers
+    // (e.g. '▶ 推进 | ✳ Claude Code' or '▶ 推进 | [Claude/common] ...').
+    if (isProgramTitle(cleaned)) return false;
+    if (GENERATED_WINDOW_LABEL_PATTERNS.some((pattern) => pattern.test(cleaned))) return false;
+    return true;
 }
 
 export function chooseTabName(prompt: string, tabs: readonly SelectedTab[]): string | null {
-    const fragment = promptMatchFragment(prompt);
-    if (!fragment) return null;
-    const hits = tabs.filter((tab) => stripWhitespace(tab.text).includes(fragment));
+    const anchors = promptMatchAnchors(prompt);
+    if (!anchors) return null;
+    const hits = tabs.filter((tab) => {
+        const normalizedText = stripWhitespace(tab.text);
+        const headIdx = normalizedText.indexOf(anchors.head);
+        if (headIdx === -1) return false;
+        if (anchors.tail === null) return true;
+        return normalizedText.indexOf(anchors.tail, headIdx + anchors.head.length) !== -1;
+    });
     if (hits.length !== 1) return null;
-    const name = hits[0].name.trim();
-    if (!isUsableTabName(name)) return null;
-    return name;
+    const rawName = hits[0].name;
+    if (!isUsableTabName(rawName)) return null;
+    const cleaned = stripDynamicTitlePrefixes(rawName);
+    return cleaned || null;
 }
 
 export function parseSelectedTabs(stdout: string): SelectedTab[] | null {
@@ -192,6 +288,14 @@ export type TabNameSyncInput = {
     readTabs: () => Promise<readonly SelectedTab[] | null>;
     currentName: () => string | undefined;
     currentNameSource?: () => string | undefined;
+    isTitleLocked?: () => boolean;
+    disableTabGuess?: boolean;
+    /**
+     * Require two consecutive turns reading the same normalized tab name even
+     * on the initial rename (defaults to true so a single tab switch or shared
+     * prompt cannot misname an unlocked window).
+     */
+    requireTwoReadsForInitial?: boolean;
     applyName: (name: string) => void;
     submittedAt?: number;
     now?: () => number;
@@ -203,8 +307,10 @@ export async function syncLocalWindowsTerminalTabName(input: TabNameSyncInput): 
     const turn = ++state.turn;
     const previousCandidate = state.pendingName;
     const previousFromName = state.pendingFromName;
+    const previousPromptKey = state.pendingPromptKey;
     state.pendingName = undefined;
     state.pendingFromName = undefined;
+    state.pendingPromptKey = undefined;
     try {
         const now = input.now ?? Date.now;
         const submittedAt = input.submittedAt ?? now();
@@ -214,24 +320,39 @@ export async function syncLocalWindowsTerminalTabName(input: TabNameSyncInput): 
         };
         if (input.platform !== 'win32') return 'skipped';
         if (input.mode !== 'local') return 'skipped';
+        if (input.disableTabGuess === true) return 'skipped';
+        if (input.isTitleLocked?.()) return 'skipped';
+        if (input.currentNameSource?.() === FIXED_SESSION_NAME_SOURCE) return 'skipped';
         if (typeof input.prompt !== 'string') return 'skipped';
-        if (promptMatchFragment(input.prompt) === null) return 'skipped';
+        const anchors = promptMatchAnchors(input.prompt);
+        if (anchors === null) return 'skipped';
         if (input.isPhoneInject(input.prompt)) return 'skipped';
         if (!fresh()) return 'kept';
         const originalName = input.currentName();
         const originalSource = input.currentNameSource?.();
         const tabs = await input.readTabs();
         if (state.turn !== turn || !fresh()) return 'kept';
+        if (input.disableTabGuess === true || input.isTitleLocked?.() || input.currentNameSource?.() === FIXED_SESSION_NAME_SOURCE) return 'kept';
         if (input.currentName() !== originalName || input.currentNameSource?.() !== originalSource) return 'kept';
         if (tabs === null) return 'kept';
         const name = chooseTabName(input.prompt, tabs);
         if (!name) return 'kept';
         if (input.currentName() === name && input.currentNameSource?.() === TERMINAL_TAB_NAME_SOURCE) return 'kept';
-        if (originalName?.trim() && originalSource === TERMINAL_TAB_NAME_SOURCE
-            && (previousCandidate !== name || previousFromName !== originalName)) {
-            state.pendingName = name;
-            state.pendingFromName = originalName;
-            return 'kept';
+
+        const promptKey = `${anchors.head}|${anchors.tail ?? ''}`;
+        const requireTwoReads = input.requireTwoReadsForInitial ?? true;
+        const isExistingTabRename = Boolean(originalName?.trim() && originalSource === TERMINAL_TAB_NAME_SOURCE);
+        const needsConfirmation = isExistingTabRename || requireTwoReads;
+
+        if (needsConfirmation) {
+            const sameCandidate = previousCandidate === name && previousFromName === (originalName ?? '');
+            const distinctPromptOrExisting = isExistingTabRename || previousPromptKey !== promptKey;
+            if (!sameCandidate || !distinctPromptOrExisting) {
+                state.pendingName = name;
+                state.pendingFromName = originalName ?? '';
+                state.pendingPromptKey = promptKey;
+                return 'kept';
+            }
         }
         input.applyName(name);
         return 'renamed';
