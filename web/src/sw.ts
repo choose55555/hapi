@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching'
 import { registerRoute } from 'workbox-routing'
-import { CacheFirst, NetworkFirst } from 'workbox-strategies'
+import { CacheFirst, NetworkFirst, NetworkOnly } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import {
     cleanupExpiredShareTransfers,
@@ -66,19 +66,12 @@ registerRoute(
 // worker evaluation when index.html was not in the manifest (the dev worker), and a
 // catch-all also risked answering server paths such as /health with HTML.
 
+// Never replay up to 5-minute-old /api/sessions snapshots on slow mobile relay
+// timeouts: stale list replay makes newly created or active sessions appear to
+// vanish after exiting a session detail view.
 registerRoute(
     ({ url }) => url.pathname === '/api/sessions',
-    new NetworkFirst({
-        cacheName: 'api-sessions',
-        networkTimeoutSeconds: 10,
-        plugins: [
-            cacheOkResponsesOnly,
-            new ExpirationPlugin({
-                maxEntries: 10,
-                maxAgeSeconds: 60 * 5
-            })
-        ]
-    })
+    new NetworkOnly()
 )
 
 registerRoute(
@@ -145,6 +138,10 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('activate', (event) => {
     event.waitUntil((async () => {
+        // Purge any legacy stale /api/sessions cache left by older SW versions.
+        if (typeof caches !== 'undefined') {
+            await caches.delete('api-sessions').catch(() => undefined)
+        }
         await self.clients.claim()
         if (!replacingWorker) return
         const windows = await self.clients.matchAll({ type: 'window' })

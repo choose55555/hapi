@@ -1,5 +1,5 @@
 import { mergeReadState } from '@hapi/protocol'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import {
     compareSessionSummaries,
@@ -39,6 +39,14 @@ import {
     sessionRemovedQueuesFullTable,
     summaryPatchMissesRow
 } from './sessionListRefetch'
+import {
+    classifyVisibility404Action,
+    computeReconnectDelayMs,
+    decideOnlineEventAction,
+    decideVisibilityResumeAction,
+    SSE_CONNECT_TIMEOUT_MS,
+    SSE_HEARTBEAT_STALE_MS
+} from './sseReconnectPolicy'
 
 // Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
 // with the fixture generator); re-exported here so hook consumers and existing
@@ -94,26 +102,9 @@ type VisibilityState = 'visible' | 'hidden'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
-const HEARTBEAT_STALE_MS = 90_000
-// The hub sends a heartbeat every 30s. When a suspended mobile tab returns to
-// the foreground, the connection may have been silently killed (no FIN/RST
-// ever reaches the browser), so a single missed heartbeat interval is already
-// enough to distrust it on resume. The watchdog keeps the longer 90s
-// threshold for tabs that stayed visible throughout.
-const VISIBILITY_RESUME_STALE_MS = 45_000
-// A new EventSource that hasn't opened within this window is likely hung on a
-// dead pooled socket (common right after a suspended tab resumes) — abandon
-// it and retry on a fresh connection instead of waiting for the watchdog.
-const CONNECT_TIMEOUT_MS = 10_000
+const HEARTBEAT_STALE_MS = SSE_HEARTBEAT_STALE_MS
+const CONNECT_TIMEOUT_MS = SSE_CONNECT_TIMEOUT_MS
 const HEARTBEAT_WATCHDOG_INTERVAL_MS = 10_000
-const RECONNECT_BASE_DELAY_MS = 1_000
-const RECONNECT_MAX_DELAY_MS = 30_000
-const RECONNECT_JITTER_MS = 500
-// A hub that stays unreachable is usually offline for hours, not seconds.
-// Retrying every 30s forever costs a full TLS handshake per attempt through
-// the relay, so widen the ceiling once the fast retries have clearly failed.
-const RECONNECT_SLOW_AFTER_ATTEMPTS = 8
-const RECONNECT_SLOW_MAX_DELAY_MS = 300_000
 
 function isSessionRecord(value: unknown): value is Session {
     return SessionSchema.safeParse(value).success
@@ -263,7 +254,7 @@ export function useSSE(options: {
     onDisconnect?: (reason: string) => void
     onError?: (error: unknown) => void
     onToast?: (event: ToastEvent) => void
-}): { subscriptionId: string | null } {
+}): { subscriptionId: string | null; reportVisibility404: (failedSubscriptionId: string | null | undefined) => boolean } {
     const queryClient = useQueryClient()
     const onEventRef = useRef(options.onEvent)
     const onConnectRef = useRef(options.onConnect)
@@ -286,6 +277,16 @@ export function useSSE(options: {
     const lastActivityAtRef = useRef(0)
     const [reconnectNonce, setReconnectNonce] = useState(0)
     const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
+    const subscriptionIdRef = useRef<string | null>(null)
+    const pendingVisibility404IdRef = useRef<string | null>(null)
+    const reportVisibility404Ref = useRef<(failedId: string | null | undefined) => boolean>(() => false)
+    const setActiveSubscriptionId = (next: string | null) => {
+        subscriptionIdRef.current = next
+        if (next === null || pendingVisibility404IdRef.current !== next) {
+            pendingVisibility404IdRef.current = null
+        }
+        setSubscriptionId(next)
+    }
 
     useEffect(() => {
         onEventRef.current = options.onEvent
@@ -326,11 +327,11 @@ export function useSSE(options: {
             }
             reconnectAttemptRef.current = 0
             reconnectDeferredRef.current = false
-            setSubscriptionId(null)
+            setActiveSubscriptionId(null)
             return
         }
 
-        setSubscriptionId(null)
+        setActiveSubscriptionId(null)
         const resumeCursor = lastEventCursorRef.current?.key === subscriptionKey
             ? lastEventCursorRef.current.id
             : null
@@ -358,15 +359,7 @@ export function useSSE(options: {
             }
 
             const attempt = reconnectAttemptRef.current
-            const maxDelay = attempt >= RECONNECT_SLOW_AFTER_ATTEMPTS
-                ? RECONNECT_SLOW_MAX_DELAY_MS
-                : RECONNECT_MAX_DELAY_MS
-            // First attempt reconnects immediately (jitter only) — backoff is
-            // for repeated failures, not for the initial recovery.
-            const exponentialDelay = attempt === 0
-                ? 0
-                : Math.min(maxDelay, RECONNECT_BASE_DELAY_MS * (2 ** (attempt - 1)))
-            const jitter = Math.floor(Math.random() * (RECONNECT_JITTER_MS + 1))
+            const delayMs = computeReconnectDelayMs(attempt, Math.random())
             reconnectAttemptRef.current = attempt + 1
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
@@ -374,7 +367,7 @@ export function useSSE(options: {
             reconnectTimerRef.current = setTimeout(() => {
                 reconnectTimerRef.current = null
                 setReconnectNonce((value) => value + 1)
-            }, exponentialDelay + jitter)
+            }, delayMs)
         }
 
         const notifyDisconnect = (reason: string) => {
@@ -419,7 +412,7 @@ export function useSSE(options: {
             if (eventSourceRef.current === eventSource) {
                 eventSourceRef.current = null
             }
-            setSubscriptionId(null)
+            setActiveSubscriptionId(null)
             scheduleReconnect()
         }
 
@@ -634,7 +627,7 @@ export function useSSE(options: {
                 if (data && typeof data === 'object' && 'subscriptionId' in data) {
                     const nextId = (data as { subscriptionId?: unknown }).subscriptionId
                     if (typeof nextId === 'string' && nextId.length > 0) {
-                        setSubscriptionId(nextId)
+                        setActiveSubscriptionId(nextId)
                     }
                 }
                 // The connect callback fires here, not on EventSource open:
@@ -875,27 +868,89 @@ export function useSSE(options: {
         // threshold: a device suspend can kill the connection without the
         // browser ever noticing, so a missed heartbeat interval at resume
         // already warrants a proactive reconnect.
+        const triggerImmediateReconnect = () => {
+            reconnectDeferredRef.current = false
+            pendingVisibility404IdRef.current = null
+            reconnectAttemptRef.current = 0
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current)
+                reconnectTimerRef.current = null
+            }
+            setReconnectNonce((value) => value + 1)
+        }
+
+        reportVisibility404Ref.current = (failedSubscriptionId) => {
+            const action = classifyVisibility404Action({
+                currentSubscriptionId: subscriptionIdRef.current,
+                failedSubscriptionId,
+                visibility: getVisibilityState()
+            })
+            if (action === 'defer-until-visible') {
+                pendingVisibility404IdRef.current = failedSubscriptionId ?? null
+                return false
+            }
+            if (action !== 'reconnect-now') {
+                return false
+            }
+            pendingVisibility404IdRef.current = null
+            reconnectAttemptRef.current = 0
+            requestReconnect('visibility-404', true)
+            return true
+        }
+
         const onVisibilityChange = () => {
-            if (getVisibilityState() !== 'visible') return
-            // A retry fell due while the tab was hidden and was deliberately
-            // not scheduled. Run it now, before the identity guard below:
-            // requestReconnect has already cleared eventSourceRef.
-            if (reconnectDeferredRef.current) {
-                reconnectDeferredRef.current = false
-                setReconnectNonce((value) => value + 1)
+            const hasPendingVisibility404 = Boolean(
+                pendingVisibility404IdRef.current
+                && subscriptionIdRef.current
+                && pendingVisibility404IdRef.current === subscriptionIdRef.current
+            )
+            const action = decideVisibilityResumeAction({
+                visibility: getVisibilityState(),
+                reconnectDeferred: reconnectDeferredRef.current,
+                hasPendingReconnectTimer: reconnectTimerRef.current !== null,
+                hasActiveEventSource: eventSourceRef.current === eventSource,
+                elapsedSinceActivityMs: Date.now() - lastActivityAtRef.current,
+                hasPendingVisibility404
+            })
+            if (action === 'reconnect-now-reset-backoff') {
+                pendingVisibility404IdRef.current = null
+                if (hasPendingVisibility404 && eventSourceRef.current === eventSource) {
+                    reconnectAttemptRef.current = 0
+                    requestReconnect('visibility-404', true)
+                } else {
+                    triggerImmediateReconnect()
+                }
                 return
             }
-            if (eventSourceRef.current !== eventSource) return
-            if (Date.now() - lastActivityAtRef.current >= VISIBILITY_RESUME_STALE_MS) {
+            if (action === 'reconnect-stale') {
+                reconnectAttemptRef.current = 0
                 requestReconnect('visibility-recovery')
+                return
+            }
+            if (action === 'refresh-sessions-only') {
+                queueSessionListInvalidation()
+            }
+        }
+        const onOnline = () => {
+            const action = decideOnlineEventAction({
+                visibility: getVisibilityState(),
+                hasActiveEventSource: eventSourceRef.current === eventSource,
+                hasPendingReconnectTimer: reconnectTimerRef.current !== null,
+                reconnectDeferred: reconnectDeferredRef.current
+            })
+            if (action === 'reconnect-now-reset-backoff') {
+                triggerImmediateReconnect()
             }
         }
         document.addEventListener('visibilitychange', onVisibilityChange)
+        window.addEventListener('online', onOnline)
 
         return () => {
             clearInterval(watchdogTimer)
             clearTimeout(connectDeadlineTimer)
             document.removeEventListener('visibilitychange', onVisibilityChange)
+            window.removeEventListener('online', onOnline)
+            reportVisibility404Ref.current = () => false
             invalidationBatchRef.current?.dispose()
             invalidationBatchRef.current = null
             if (reconnectTimerRef.current) {
@@ -906,9 +961,15 @@ export function useSSE(options: {
             if (eventSourceRef.current === eventSource) {
                 eventSourceRef.current = null
             }
-            setSubscriptionId(null)
+            pendingVisibility404IdRef.current = null
+            setActiveSubscriptionId(null)
         }
     }, [options.baseUrl, options.enabled, options.scope, options.token, scope, subscriptionKey, queryClient, reconnectNonce])
 
-    return { subscriptionId }
+    const reportVisibility404 = useCallback(
+        (failedSubscriptionId: string | null | undefined) => reportVisibility404Ref.current(failedSubscriptionId),
+        []
+    )
+
+    return { subscriptionId, reportVisibility404 }
 }

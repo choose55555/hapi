@@ -3,13 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
     precache: vi.fn(), cleanup: vi.fn(), route: vi.fn(),
     strategy: vi.fn(function (this: { options: unknown }, options: unknown) { this.options = options }),
+    networkOnly: vi.fn(function () {}),
 }))
 vi.mock('workbox-precaching', () => ({
     precacheAndRoute: mocks.precache, cleanupOutdatedCaches: mocks.cleanup,
     createHandlerBoundToURL: vi.fn(() => () => new Response('shell')),
 }))
 vi.mock('workbox-routing', () => ({ registerRoute: mocks.route }))
-vi.mock('workbox-strategies', () => ({ CacheFirst: mocks.strategy, NetworkFirst: mocks.strategy }))
+vi.mock('workbox-strategies', () => ({
+    CacheFirst: mocks.strategy, NetworkFirst: mocks.strategy, NetworkOnly: mocks.networkOnly,
+}))
 vi.mock('workbox-expiration', () => ({ ExpirationPlugin: class { constructor(public options: unknown) {} } }))
 vi.mock('./lib/shareTransfer', () => ({
     cleanupExpiredShareTransfers: vi.fn(async () => {}),
@@ -53,6 +56,22 @@ beforeEach(() => {
 })
 
 describe('v7 service worker', () => {
+    it('serves the session list from the network and clears the previous list cache on activation', async () => {
+        const deleteCache = vi.fn(async () => true)
+        vi.stubGlobal('caches', { delete: deleteCache })
+        await import('./sw')
+
+        const request = { url: new URL('https://hapi.test/api/sessions'), request: { mode: 'cors' } }
+        const sessionRoute = mocks.route.mock.calls.find(([match]) =>
+            typeof match === 'function' && match(request))
+        expect(sessionRoute).toBeDefined()
+        expect(mocks.networkOnly).toHaveBeenCalledTimes(1)
+        expect(sessionRoute?.[1]).toBe(mocks.networkOnly.mock.instances[0])
+
+        await dispatch('activate')
+        expect(deleteCache).toHaveBeenCalledWith('api-sessions')
+    })
+
     it('skips waiting on install, claims clients and cleans obsolete precaches', async () => {
         await import('./sw')
         await dispatch('install')

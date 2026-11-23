@@ -50,6 +50,7 @@ import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
+import { recordSessionEntered, recordSessionExited } from '@/components/SessionList'
 import type { SessionResponse, SyncEvent } from '@/types/api'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
@@ -181,6 +182,17 @@ function AppInner() {
     const queryClient = useQueryClient()
     const sessionMatch = matchRoute({ to: '/sessions/$sessionId' })
     const selectedSessionId = sessionMatch && sessionMatch.sessionId !== 'new' ? sessionMatch.sessionId : null
+    const prevAppSelectedSessionIdRef = useRef<string | null>(selectedSessionId)
+    useEffect(() => {
+        const prevId = prevAppSelectedSessionIdRef.current
+        prevAppSelectedSessionIdRef.current = selectedSessionId
+        if (selectedSessionId) {
+            recordSessionEntered(selectedSessionId)
+        } else if (prevId) {
+            recordSessionExited(prevId, Date.now())
+        }
+    }, [selectedSessionId])
+
     const { isSyncing, startSync, endSync } = useSyncingState()
     const {
         isReconnecting: sseDisconnected,
@@ -500,7 +512,7 @@ function AppInner() {
     const revealReconnecting = useDelayedFlag(showReconnectingBanner, CONNECTION_STATUS_DELAY_MS)
     const revealSyncing = useDelayedFlag(isSyncing, CONNECTION_STATUS_DELAY_MS)
 
-    const { subscriptionId: globalSubscriptionId } = useSSE({
+    const { subscriptionId: globalSubscriptionId, reportVisibility404: reportGlobalVisibility404 } = useSSE({
         enabled: sseEnabled,
         token: token ?? '',
         baseUrl,
@@ -512,7 +524,7 @@ function AppInner() {
         onToast: handleToast
     })
 
-    const { subscriptionId: sessionSubscriptionId } = useSSE({
+    const { subscriptionId: sessionSubscriptionId, reportVisibility404: reportSessionVisibility404 } = useSSE({
         enabled: sseEnabled && Boolean(sessionEventSubscription),
         token: token ?? '',
         baseUrl,
@@ -525,13 +537,15 @@ function AppInner() {
     useVisibilityReporter({
         api,
         subscriptionId: globalSubscriptionId,
-        enabled: sseEnabled
+        enabled: sseEnabled,
+        onSubscriptionNotFound: reportGlobalVisibility404
     })
 
     useVisibilityReporter({
         api,
         subscriptionId: sessionSubscriptionId,
-        enabled: sseEnabled && Boolean(sessionEventSubscription)
+        enabled: sseEnabled && Boolean(sessionEventSubscription),
+        onSubscriptionNotFound: reportSessionVisibility404
     })
 
     // Loading auth source

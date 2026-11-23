@@ -87,17 +87,15 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
         vi.useRealTimers()
     })
 
-    it('reconnects on visibility resume when a heartbeat interval was missed', () => {
+    it('reconnects on visibility resume after 75 seconds of silence', () => {
         const onDisconnect = vi.fn()
         const { unmount } = renderUseSSE({ onDisconnect })
 
         expect(FakeEventSource.instances).toHaveLength(1)
         act(() => { FakeEventSource.instances[0]?.simulateOpen() })
 
-        // Silence for 70s: more than one 30s heartbeat missed, but below the
-        // 90s watchdog threshold. A resume from background must not trust
-        // this connection.
-        act(() => { vi.advanceTimersByTime(70_000) })
+        // Check the resume threshold before the 90-second watchdog can fire.
+        act(() => { vi.advanceTimersByTime(75_000) })
         act(() => { document.dispatchEvent(new Event('visibilitychange')) })
 
         expect(onDisconnect).toHaveBeenCalledWith('visibility-recovery')
@@ -110,12 +108,12 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
         unmount()
     })
 
-    it('keeps a fresh connection on visibility resume', () => {
+    it('keeps the connection on visibility resume before 75 seconds of silence', () => {
         const onDisconnect = vi.fn()
         const { unmount } = renderUseSSE({ onDisconnect })
 
         act(() => { FakeEventSource.instances[0]?.simulateOpen() })
-        act(() => { vi.advanceTimersByTime(20_000) })
+        act(() => { vi.advanceTimersByTime(74_999) })
         act(() => { document.dispatchEvent(new Event('visibilitychange')) })
 
         expect(onDisconnect).not.toHaveBeenCalled()
@@ -130,7 +128,9 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
 
         expect(FakeEventSource.instances).toHaveLength(1)
         // never opens (e.g. request hung on a dead pooled socket)
-        act(() => { vi.advanceTimersByTime(10_100) })
+        act(() => { vi.advanceTimersByTime(14_999) })
+        expect(onDisconnect).not.toHaveBeenCalled()
+        act(() => { vi.advanceTimersByTime(1) })
 
         expect(onDisconnect).toHaveBeenCalledWith('connect-timeout')
         expect(FakeEventSource.instances[0]?.readyState).toBe(FakeEventSource.CLOSED)
@@ -169,7 +169,7 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
 
         // Second cycle never opens — the connect deadline must still fire
         // (force path) instead of being swallowed by the one-shot guard.
-        act(() => { vi.advanceTimersByTime(10_100) })
+        act(() => { vi.advanceTimersByTime(15_100) })
         expect(onDisconnect).toHaveBeenCalledWith('connect-timeout')
         expect(FakeEventSource.instances[1]?.readyState).toBe(FakeEventSource.CLOSED)
 
