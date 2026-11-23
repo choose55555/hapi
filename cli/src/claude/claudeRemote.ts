@@ -530,6 +530,8 @@ export async function claudeRemote(opts: {
                 }
                 mode = next.mode;
                 specialCommand = nextSpecialCommand;
+                // A reused SDK stream can accept another turn without another init.
+                updateThinking(true);
                 pushUserMessage(next.message);
                 setSteerable(nextSpecialCommand.type === null);
                 logger.debug(
@@ -661,6 +663,11 @@ export async function claudeRemote(opts: {
                 message.type === 'system' && message.subtype === 'compact_boundary'
                     ? (message as any).compact_metadata
                     : undefined;
+            // A carried-over background task can wake the main SDK turn without a queued prompt.
+            if (message.type === 'assistant' && message.message && !message.parent_tool_use_id
+                && !message.isApiErrorMessage && !compactCompletion) {
+                updateThinking(true);
+            }
             if (!isManualCompactBoundaryMessage(message) && !isCompactEchoMessage(message)) {
                 opts.onMessage(message);
             }

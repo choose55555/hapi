@@ -264,6 +264,8 @@ export class ApiSessionClient extends EventEmitter {
     private hasConnectedOnce = false
     // Replayed on (re)connect: a volatile heartbeat sent while disconnected is dropped (#2053).
     private latestKeepAlive: Omit<Parameters<ClientToServerEvents['session-alive']>[0], 'sid' | 'time'> | null = null
+    // Snapshots are transient Hub state. Reconnect with only the newest one.
+    private latestClaudeBackgroundTasks: MessageContent | null = null
     readonly rpcHandlerManager: RpcHandlerManager
     private readonly terminalManager: TerminalManager
     private agentTerminalResize: ((cols: number, rows: number) => void) | null = null
@@ -367,6 +369,7 @@ export class ApiSessionClient extends EventEmitter {
                 thinking: false,
                 ...this.latestKeepAlive
             })
+            this.publishClaudeBackgroundTasks()
         })
 
         this.socket.on('rpc-request', async (data: { method: string; params: string }, callback: (response: string) => void) => {
@@ -997,6 +1000,12 @@ export class ApiSessionClient extends EventEmitter {
         await this.backfillInFlight
     }
 
+    private publishClaudeBackgroundTasks(): void {
+        if (this.latestClaudeBackgroundTasks && this.state === 'active' && this.socket.connected) {
+            this.socket.emit('message', { sid: this.sessionId, message: this.latestClaudeBackgroundTasks })
+        }
+    }
+
     sendClaudeSessionMessage(body: RawJSONLines): void {
         let content: MessageContent
         // Preserve transcript time for agent output and genuine local input.
@@ -1039,6 +1048,12 @@ export class ApiSessionClient extends EventEmitter {
                     createdAt = parsed
                 }
             }
+        }
+
+        if (body.type === 'system' && body.subtype === 'background_tasks_changed' && Array.isArray(body.tasks)) {
+            this.latestClaudeBackgroundTasks = content
+            this.publishClaudeBackgroundTasks()
+            return
         }
 
         this.emitOrQueue(() => {
