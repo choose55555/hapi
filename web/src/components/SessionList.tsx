@@ -477,25 +477,15 @@ export function deduplicateSessionsByAgentId(
             if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1
             return b.updatedAt - a.updatedAt
         })
-        // Keep every active independent hub session; only collapse inactive duplicates.
+        // Keep distinct live sessions and retain the just-exited row during its grace period.
         const activeSessions = group.filter(item => item.active)
-        if (activeSessions.length > 0) {
-            const keptIds = new Set<string>()
-            for (const item of activeSessions) {
-                result.push(item)
-                keptIds.add(item.id)
-            }
-            for (const anchorId of [selectedSessionId, recentSessionId]) {
-                if (!anchorId || keptIds.has(anchorId)) continue
-                const anchored = group.find(item => item.id === anchorId)
-                if (anchored) {
-                    result.push(anchored)
-                    keptIds.add(anchored.id)
-                }
-            }
-        } else {
+        if (activeSessions.length === 0) {
             result.push(group[0])
+            continue
         }
+        result.push(...activeSessions)
+        const recentlyExited = group.find(item => item.id === recentSessionId)
+        if (recentlyExited && !recentlyExited.active) result.push(recentlyExited)
     }
 
     return result
@@ -1652,9 +1642,9 @@ export function SessionList(props: {
         bootstrapRecentSessionOnMount(selectedSessionId)
     ))
     const handleSelectSession = useCallback(
-        (sessionId: string, targetMessageId?: string, targetMessageQuery?: string) => {
-            recordSessionEntered(sessionId)
-            props.onSelect(sessionId, targetMessageId, targetMessageQuery)
+        (...args: Parameters<typeof props.onSelect>) => {
+            recordSessionEntered(args[0])
+            props.onSelect(...args)
         },
         [props.onSelect]
     )
